@@ -8,4 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
+directories = "6.0.0"
 local-transfer-core = { path = "crates/local-transfer-core" }
+tempfile = "3.22.0"
+uuid = { version = "1.18.1", features = ["v4"] }

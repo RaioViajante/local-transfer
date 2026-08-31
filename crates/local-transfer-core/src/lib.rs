@@ -1,5 +1,7 @@
 //! Shared domain library for local-transfer applications.
 
+pub mod identity;
+
 /// Returns the version of the shared core library.
 #[must_use]
 pub const fn version() -> &'static str {
