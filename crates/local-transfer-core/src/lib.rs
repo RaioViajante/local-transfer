@@ -1,5 +1,6 @@
 //! Shared domain library for local-transfer applications.
 
+pub mod device_name;
 pub mod identity;
 
 /// Returns the version of the shared core library.

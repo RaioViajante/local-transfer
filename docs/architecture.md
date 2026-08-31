@@ -41,6 +41,8 @@ Platform-specific behavior should sit behind narrow interfaces. The core may dep
 
 The installation identifier is a canonical UUID version 4 generated from operating-system randomness. The core stores it as `device-id` in the platform application configuration directory and also accepts an explicit storage path for isolated tests and future host adapters. Initial creation uses a fully written temporary file and a no-clobber persist operation so concurrent initialization cannot replace an established identity. Existing unreadable or invalid data is an error and is never silently regenerated.
 
+`DeviceId` is the stable installation identity. `DeviceName` is a separate mutable presentation label, stored as `device-name` in the same configuration directory. A missing name is initialized to `Local Device`; invalid existing name data is reported rather than reset. Name updates atomically replace only the display-name file and never modify the device identifier.
+
 ### CLI
 
 The CLI will be a Rust binary using Clap for argument parsing. It will call `local-transfer-core` directly and translate core events and errors into terminal output and exit codes. It should contain presentation and process-lifecycle concerns, not a second protocol implementation.
