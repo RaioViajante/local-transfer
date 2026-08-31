@@ -1,0 +1,12 @@
+[package]
+name = "local-transfer-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "local-transfer"
+path = "src/main.rs"
+
+[dependencies]
+local-transfer-core.workspace = true

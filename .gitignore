@@ -1,0 +1,42 @@
+# Rust and Cargo
+/target/
+**/*.rs.bk
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Node, pnpm, and Vite
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*~
+.directory
+
+# Logs and local temporary files
+*.log
+*.tmp
+*.temp

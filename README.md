@@ -6,14 +6,14 @@ The project exists to make transfers between devices on the same local network s
 
 ## Status
 
-The project is in the architecture and documentation phase. No application code, protocol implementation, or stable command-line interface exists yet.
+The project has a minimal Rust workspace establishing the shared core and CLI boundaries. No protocol implementation, functional command-line interface, or desktop application exists yet.
 
 ## Planned structure
 
 ```text
 local-transfer/
 ├── crates/
-│   └── local-transfer-core/   # Shared Rust domain and protocol logic
+│   └── local-transfer-core/   # Shared Rust domain and future protocol logic
 ├── apps/
 │   ├── cli/                   # Rust CLI using the core directly
 │   └── desktop/               # Tauri 2, React, TypeScript, Vite, and pnpm
