@@ -36,7 +36,7 @@ impl Platform {
         }
     }
 
-    fn from_target_os(target_os: &str) -> Result<Self, UnsupportedPlatformError> {
+    pub(crate) fn from_target_os(target_os: &str) -> Result<Self, UnsupportedPlatformError> {
         match target_os {
             "macos" => Ok(Self::MacOs),
             "windows" => Ok(Self::Windows),

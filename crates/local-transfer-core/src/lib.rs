@@ -2,9 +2,12 @@
 
 pub mod device_name;
 pub mod identity;
+mod local_device;
 pub mod platform;
 
 mod persistence;
+
+pub use local_device::{LocalDevice, LocalDeviceError, LocalDeviceManager};
 
 /// Returns the version of the shared core library.
 #[must_use]

@@ -5,7 +5,6 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
 use tempfile::NamedTempFile;
 
 use crate::persistence::{
@@ -101,15 +100,16 @@ impl Error for DeviceNameValidationError {}
 
 /// A filesystem-backed store for the mutable local device display name.
 #[derive(Clone, Debug)]
-pub struct DeviceNameStore {
+pub(crate) struct DeviceNameStore {
     path: PathBuf,
     harden_existing_parent: bool,
 }
 
 impl DeviceNameStore {
     /// Creates a store at an explicit path.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             harden_existing_parent: false,
@@ -117,20 +117,18 @@ impl DeviceNameStore {
     }
 
     /// Creates a store in the platform's application configuration directory.
-    pub fn for_current_user() -> Result<Self, DeviceNameError> {
-        let project_dirs = ProjectDirs::from("", "", "local-transfer")
-            .ok_or(DeviceNameError::ConfigDirectoryUnavailable)?;
-        Ok(Self {
-            path: project_dirs.config_dir().join(DEVICE_NAME_FILE_NAME),
+    pub(crate) fn in_app_config(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            path: directory.into().join(DEVICE_NAME_FILE_NAME),
             harden_existing_parent: true,
-        })
+        }
     }
 
     /// Loads the persisted name or creates the neutral default when it is absent.
     ///
     /// Existing unreadable or invalid data is returned as an error and is never
     /// silently replaced with the default.
-    pub fn load_or_create(&self) -> Result<DeviceName, DeviceNameError> {
+    pub(crate) fn load_or_create(&self) -> Result<DeviceName, DeviceNameError> {
         if self.harden_existing_parent {
             harden_existing_parent(&self.path).map_err(Self::persistence_error)?;
         }
@@ -146,7 +144,7 @@ impl DeviceNameStore {
     ///
     /// Concurrent successful updates use last-writer-wins semantics. Readers see
     /// either the complete previous value or the complete new value.
-    pub fn update(&self, value: impl AsRef<str>) -> Result<DeviceName, DeviceNameError> {
+    pub(crate) fn update(&self, value: impl AsRef<str>) -> Result<DeviceName, DeviceNameError> {
         let name = DeviceName::new(value).map_err(DeviceNameError::Validation)?;
         let temporary = self.write_temporary(&name)?;
         let file = temporary

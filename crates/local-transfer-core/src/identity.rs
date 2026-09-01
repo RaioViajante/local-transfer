@@ -6,7 +6,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use directories::ProjectDirs;
 use uuid::Uuid;
 
 use crate::persistence::{
@@ -60,7 +59,7 @@ impl Error for ParseDeviceIdError {}
 
 /// A filesystem-backed store for the local device identifier.
 #[derive(Clone, Debug)]
-pub struct DeviceIdStore {
+pub(crate) struct DeviceIdStore {
     path: PathBuf,
     harden_existing_parent: bool,
 }
@@ -69,8 +68,9 @@ impl DeviceIdStore {
     /// Creates a store at an explicit path.
     ///
     /// Supplying the path keeps persistence isolated and testable.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             harden_existing_parent: false,
@@ -78,20 +78,18 @@ impl DeviceIdStore {
     }
 
     /// Creates a store in the platform's application configuration directory.
-    pub fn for_current_user() -> Result<Self, DeviceIdError> {
-        let project_dirs = ProjectDirs::from("", "", "local-transfer")
-            .ok_or(DeviceIdError::ConfigDirectoryUnavailable)?;
-        Ok(Self {
-            path: project_dirs.config_dir().join(IDENTITY_FILE_NAME),
+    pub(crate) fn in_app_config(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            path: directory.into().join(IDENTITY_FILE_NAME),
             harden_existing_parent: true,
-        })
+        }
     }
 
     /// Loads the existing ID or creates and persists one when no ID exists.
     ///
     /// Existing unreadable or invalid data is always returned as an error and is
     /// never replaced with a new identity.
-    pub fn load_or_create(&self) -> Result<DeviceId, DeviceIdError> {
+    pub(crate) fn load_or_create(&self) -> Result<DeviceId, DeviceIdError> {
         if self.harden_existing_parent {
             harden_existing_parent(&self.path).map_err(Self::persistence_error)?;
         }

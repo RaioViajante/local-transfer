@@ -45,6 +45,8 @@ The installation identifier is a canonical UUID version 4 generated from operati
 
 `Platform` is separate bounded descriptive metadata derived only from Rust's compilation target. It reports `macos`, `windows`, or `linux`; unsupported targets produce an explicit error. It contains no version, distribution, architecture, user, network, or hardware information and is never an identity or trust input.
 
+CLI and desktop adapters consume this state through the synchronous local-device public API. That API returns an immutable `LocalDevice` snapshot and coordinates loading and display-name updates through `LocalDeviceManager`; it owns configuration-directory selection and keeps filesystem stores, paths, atomic publication, and permission handling private. The dependency direction is therefore adapters → local-device API → `DeviceId` / `DeviceName` / `Platform` → private persistence.
+
 ### CLI
 
 The CLI will be a Rust binary using Clap for argument parsing. It will call `local-transfer-core` directly and translate core events and errors into terminal output and exit codes. It should contain presentation and process-lifecycle concerns, not a second protocol implementation.
