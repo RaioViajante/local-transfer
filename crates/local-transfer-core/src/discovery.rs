@@ -269,7 +269,7 @@ impl DiscoveryTxtEntry {
         &self.value
     }
 
-    fn encoded_size(&self) -> usize {
+    pub(crate) fn encoded_size(&self) -> usize {
         1 + self.key.len() + 1 + self.value.len()
     }
 

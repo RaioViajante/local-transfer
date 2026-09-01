@@ -27,6 +27,10 @@ Each TXT entry must fit the DNS-SD 255-byte length-octet limit. The complete enc
 
 Discovery is advisory. Every endpoint and advertised value must be validated, and peer identity must be established by pairing or authenticated transport rather than mDNS.
 
+Advertisements use `mdns-sd` as an internal synchronous DNS-SD adapter. The canonical service type is translated to `_local-transfer._tcp.local.` only at that boundary. Each start creates an opaque random `lt-<uuid>` service-instance label and matching `lt-<uuid>.local.` hostname; neither value is persisted or derived from `DeviceId`, `DeviceName`, the system hostname, or hardware. The library automatically tracks eligible IPv4 and IPv6 interface addresses and applies standard DNS name-conflict resolution. Conflict-selected names remain ephemeral.
+
+The caller owns the listening TCP service and supplies its non-zero port; advertisement does not create the listener. A successful start means the daemon was created and accepted the registration request, not that multicast packets have already been transmitted. Later daemon errors and conflict name changes are available through non-blocking advertisement events. Explicit stop unregisters the service and shuts down its private daemon while waiting for bounded acknowledgements. Dropping an active handle only queues best-effort cleanup and cannot report failure. Browsing is not implemented by this adapter.
+
 ## Pairing lifecycle
 
 1. A user selects a discovered device and requests pairing.
@@ -73,7 +77,6 @@ Later protocol work may add multiple files, directories, clipboard/text payloads
 
 ## Open protocol decisions
 
-- Service-instance generation and listener-port lifecycle.
 - Message framing and serialization format.
 - Pairing construction and user-verification experience.
 - TLS identity representation and pinning mechanism.

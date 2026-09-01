@@ -9,5 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 directories.workspace = true
+mdns-sd.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
