@@ -4,6 +4,14 @@
 
 The CLI provides scriptable and terminal-friendly access to the same capabilities as the desktop application. It is an adapter over `local-transfer-core`, not a separate implementation. Commands shown here describe intended workflows and are not yet a compatibility promise.
 
+## Local device inspection
+
+```text
+local-transfer device
+```
+
+The `device` command loads the current installation through the public core API and prints its permanent device ID, editable display name, and platform. Successful output goes to standard output; load failures and argument errors go to standard error with a non-zero exit status.
+
 ## Command philosophy
 
 - Prefer clear nouns and verbs over compact but obscure flags.
@@ -14,7 +22,7 @@ The CLI provides scriptable and terminal-friendly access to the same capabilitie
 - Use stable peer identifiers when names are ambiguous; display names are conveniences, not identities.
 - Surface the same core states and security decisions as the desktop application.
 
-## Conceptual commands
+## Future conceptual commands
 
 ```text
 local-transfer devices

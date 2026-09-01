@@ -9,4 +9,5 @@ name = "local-transfer"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
 local-transfer-core.workspace = true
