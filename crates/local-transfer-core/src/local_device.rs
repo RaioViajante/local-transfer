@@ -209,6 +209,22 @@ mod tests {
     }
 
     #[test]
+    fn isolated_installations_have_distinct_ids_and_the_same_neutral_default_name() {
+        let first_directory = tempdir().unwrap();
+        let second_directory = tempdir().unwrap();
+        let first = LocalDeviceManager::for_test(first_directory.path())
+            .load()
+            .unwrap();
+        let second = LocalDeviceManager::for_test(second_directory.path())
+            .load()
+            .unwrap();
+
+        assert_ne!(first.id(), second.id());
+        assert_eq!(first.name(), second.name());
+        assert_eq!(first.name().as_str(), DEFAULT_DEVICE_NAME);
+    }
+
+    #[test]
     fn updating_name_is_visible_on_reload_and_leaves_id_bytes_unchanged() {
         let directory = tempdir().unwrap();
         let manager = LocalDeviceManager::for_test(directory.path());
@@ -237,6 +253,26 @@ mod tests {
             ))
         ));
         assert!(!directory.path().join("device-id").exists());
+    }
+
+    #[test]
+    fn invalid_name_update_preserves_the_previous_public_snapshot() {
+        let directory = tempdir().unwrap();
+        let manager = LocalDeviceManager::for_test(directory.path());
+        manager.load().unwrap();
+        manager.update_name("Studio Workstation").unwrap();
+        let before = manager.load().unwrap();
+
+        let error = manager.update_name("bad\nname").unwrap_err();
+        let after = manager.load().unwrap();
+
+        assert!(matches!(
+            error,
+            LocalDeviceError::DeviceName(DeviceNameError::Validation(
+                DeviceNameValidationError::ControlCharacter
+            ))
+        ));
+        assert_eq!(after, before);
     }
 
     #[test]
