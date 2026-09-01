@@ -2,6 +2,7 @@
 
 pub mod device_name;
 pub mod identity;
+pub mod platform;
 
 /// Returns the version of the shared core library.
 #[must_use]

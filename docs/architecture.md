@@ -43,6 +43,8 @@ The installation identifier is a canonical UUID version 4 generated from operati
 
 `DeviceId` is the stable installation identity. `DeviceName` is a separate mutable presentation label, stored as `device-name` in the same configuration directory. A missing name is initialized to `Local Device`; invalid existing name data is reported rather than reset. Name updates atomically replace only the display-name file and never modify the device identifier.
 
+`Platform` is separate bounded descriptive metadata derived only from Rust's compilation target. It reports `macos`, `windows`, or `linux`; unsupported targets produce an explicit error. It contains no version, distribution, architecture, user, network, or hardware information and is never an identity or trust input.
+
 ### CLI
 
 The CLI will be a Rust binary using Clap for argument parsing. It will call `local-transfer-core` directly and translate core events and errors into terminal output and exit codes. It should contain presentation and process-lifecycle concerns, not a second protocol implementation.
