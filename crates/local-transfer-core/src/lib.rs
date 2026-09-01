@@ -1,6 +1,7 @@
 //! Shared domain library for local-transfer applications.
 
 pub mod device_name;
+pub mod discovery;
 pub mod identity;
 mod local_device;
 pub mod platform;

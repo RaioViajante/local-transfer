@@ -14,12 +14,16 @@ A device has a stable local identity backed by cryptographic key material. Human
 
 ## Discovery lifecycle
 
-1. An available instance advertises a DNS-SD service, initially expected to be `_local-transfer._tcp`.
+1. An available instance advertises the DNS-SD service `_local-transfer._tcp`.
 2. Another instance browses for that service and resolves enough information to attempt a connection.
 3. The discovered endpoint appears as untrusted unless it matches a trusted identity through a later authenticated exchange.
 4. Advertisements expire or are removed when the service is no longer reachable.
 
-Discovery data should be limited to service location, protocol compatibility information, and a non-sensitive presentation hint if usability requires one. The final TXT record fields and privacy tradeoffs remain to be decided. Discovery must never expose filenames, file sizes, transfer history, trusted-peer lists, or private identity data.
+Discovery schema version 1 has three required TXT entries: `dv=1` identifies the discovery metadata schema, while `pmin=1` and `pmax=1` describe the inclusive range of supported application-protocol major versions. Discovery-schema compatibility and application-protocol compatibility are separate: this release accepts only discovery schema 1, and two peers are application-compatible when their inclusive `pmin..=pmax` ranges overlap. An implementation should select the highest major version in the overlap.
+
+Two optional presentation entries are defined: `name` is a UTF-8 hint of at most 96 bytes, and `os` is exactly `macos`, `windows`, or `linux`. Both are unauthenticated, non-authoritative, and may be absent. Invalid optional hints are discarded while otherwise valid compatibility metadata remains usable. Required values use canonical unsigned decimal text; missing, malformed, unsupported, reversed, or duplicated known fields invalidate the metadata. Unknown keys are ignored for forward compatibility after all size bounds are enforced.
+
+Each TXT entry must fit the DNS-SD 255-byte length-octet limit. The complete encoded local-transfer TXT metadata, including each entry's length octet, is limited to 512 bytes. Local encoders emit only `dv`, `pmin`, `pmax`, `name`, and `os`. Addresses and ports come from DNS-SD SRV/A/AAAA resolution and are not duplicated in TXT metadata.
 
 Discovery is advisory. Every endpoint and advertised value must be validated, and peer identity must be established by pairing or authenticated transport rather than mDNS.
 
@@ -69,7 +73,7 @@ Later protocol work may add multiple files, directories, clipboard/text payloads
 
 ## Open protocol decisions
 
-- Service advertisement fields and listener-port lifecycle.
+- Service-instance generation and listener-port lifecycle.
 - Message framing and serialization format.
 - Pairing construction and user-verification experience.
 - TLS identity representation and pinning mechanism.

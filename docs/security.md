@@ -10,6 +10,10 @@ Availability against a fully hostile local network cannot be guaranteed. The imp
 
 The local network is untrusted. Finding a device through mDNS/DNS-SD proves only that an endpoint advertised a service; it does not prove who controls it. Display names, addresses, and discovery identifiers are hints, not authentication claims.
 
+The `_local-transfer._tcp` TXT schema is deliberately limited to discovery-schema and application-protocol compatibility plus optional bounded name and operating-system hints. It never advertises the permanent `DeviceId`. It also excludes hostnames, usernames, MAC or duplicated IP addresses, filesystem paths, filenames, transfer history or metadata, trusted-peer state, certificates, keys, fingerprints, tokens, secrets, hardware identifiers, and OS/kernel versions. Connection addresses and ports come from normal DNS-SD resolution.
+
+Future advertisements must use an opaque ephemeral service-instance identifier suitable for DNS-SD uniqueness. That identifier must not embed or persist the permanent `DeviceId`, hostname, username, device-name persistence identifiers, or hardware identifiers. Its generation and lifecycle belong to the advertisement implementation, not the metadata schema.
+
 Trust is established per device through explicit pairing. A trusted-peer record should bind a stable peer identifier to authenticated key material and the user-visible identity needed to recognize it. Trust persists until it is revoked, reset, or invalidated by an identity change. A device presenting unexpected key material must not be silently accepted as the previously trusted peer.
 
 Trusting a device authorizes authenticated communication; it does not automatically authorize every incoming file. Transfer acceptance remains a distinct user decision unless a narrowly scoped future policy explicitly changes that behavior.
