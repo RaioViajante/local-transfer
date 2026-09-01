@@ -66,6 +66,8 @@ The displayed filename and the actual opened destination must refer to the same 
 
 Persistence should be limited to identity keys, trusted peers, settings, and the minimum transfer metadata required for the intended experience. Sensitive values should have restrictive file permissions and use OS credential facilities where they materially improve key protection. Logs must avoid file contents, secrets, pairing material, and unnecessary full paths. There is no telemetry or analytics.
 
+For current application-owned identity/configuration state, Unix-family systems enforce mode `0700` on the `local-transfer` configuration directory and `0600` on managed files, including correcting broader existing modes. Explicit test/adapter paths do not change an already-existing parent directory, but newly created immediate storage directories and all managed files are restrictive. On Windows, the application uses the per-user roaming configuration location and preserves its inherited ACLs; it does not yet install or claim a custom restrictive ACL. These filesystem controls limit local exposure but do not make `DeviceId` or `DeviceName` cryptographic secrets. Future private key material requires a separate secure-storage design.
+
 The exact history retention and deletion policy remains unresolved and must be visible to both CLI and desktop users.
 
 ## Security review gates

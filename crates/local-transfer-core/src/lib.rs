@@ -4,6 +4,8 @@ pub mod device_name;
 pub mod identity;
 pub mod platform;
 
+mod persistence;
+
 /// Returns the version of the shared core library.
 #[must_use]
 pub const fn version() -> &'static str {

@@ -3,13 +3,16 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use directories::ProjectDirs;
-use tempfile::NamedTempFile;
 use uuid::Uuid;
+
+use crate::persistence::{
+    PersistenceError, PersistenceOperation, create_synced_temporary, harden_existing_file,
+    harden_existing_parent,
+};
 
 const IDENTITY_FILE_NAME: &str = "device-id";
 
@@ -59,6 +62,7 @@ impl Error for ParseDeviceIdError {}
 #[derive(Clone, Debug)]
 pub struct DeviceIdStore {
     path: PathBuf,
+    harden_existing_parent: bool,
 }
 
 impl DeviceIdStore {
@@ -67,16 +71,20 @@ impl DeviceIdStore {
     /// Supplying the path keeps persistence isolated and testable.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            harden_existing_parent: false,
+        }
     }
 
     /// Creates a store in the platform's application configuration directory.
     pub fn for_current_user() -> Result<Self, DeviceIdError> {
         let project_dirs = ProjectDirs::from("", "", "local-transfer")
             .ok_or(DeviceIdError::ConfigDirectoryUnavailable)?;
-        Ok(Self::new(
-            project_dirs.config_dir().join(IDENTITY_FILE_NAME),
-        ))
+        Ok(Self {
+            path: project_dirs.config_dir().join(IDENTITY_FILE_NAME),
+            harden_existing_parent: true,
+        })
     }
 
     /// Loads the existing ID or creates and persists one when no ID exists.
@@ -84,6 +92,10 @@ impl DeviceIdStore {
     /// Existing unreadable or invalid data is always returned as an error and is
     /// never replaced with a new identity.
     pub fn load_or_create(&self) -> Result<DeviceId, DeviceIdError> {
+        if self.harden_existing_parent {
+            harden_existing_parent(&self.path).map_err(Self::persistence_error)?;
+        }
+        harden_existing_file(&self.path).map_err(Self::persistence_error)?;
         match fs::read_to_string(&self.path) {
             Ok(contents) => self.parse_persisted(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.create(),
@@ -104,37 +116,13 @@ impl DeviceIdStore {
     }
 
     fn create(&self) -> Result<DeviceId, DeviceIdError> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| DeviceIdError::InvalidPath {
-                path: self.path.clone(),
-            })?;
-        fs::create_dir_all(parent).map_err(|source| DeviceIdError::Io {
-            operation: "create device identity directory",
-            path: parent.to_path_buf(),
-            source,
-        })?;
-
         let device_id = DeviceId::random();
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|source| DeviceIdError::Io {
-            operation: "create temporary device identity",
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        writeln!(temporary, "{device_id}").map_err(|source| DeviceIdError::Io {
-            operation: "write temporary device identity",
-            path: temporary.path().to_path_buf(),
-            source,
-        })?;
-        temporary
-            .as_file()
-            .sync_all()
-            .map_err(|source| DeviceIdError::Io {
-                operation: "sync temporary device identity",
-                path: temporary.path().to_path_buf(),
-                source,
-            })?;
+        let temporary = create_synced_temporary(
+            &self.path,
+            format!("{device_id}\n").as_bytes(),
+            self.harden_existing_parent,
+        )
+        .map_err(Self::persistence_error)?;
 
         match temporary.persist_noclobber(&self.path) {
             Ok(file) => {
@@ -157,12 +145,38 @@ impl DeviceIdStore {
     }
 
     fn load_existing_after_race(&self) -> Result<DeviceId, DeviceIdError> {
+        harden_existing_file(&self.path).map_err(Self::persistence_error)?;
         let contents = fs::read_to_string(&self.path).map_err(|source| DeviceIdError::Io {
             operation: "read concurrently created device identity",
             path: self.path.clone(),
             source,
         })?;
         self.parse_persisted(&contents)
+    }
+
+    fn persistence_error(error: PersistenceError) -> DeviceIdError {
+        match error {
+            PersistenceError::InvalidPath { path } => DeviceIdError::InvalidPath { path },
+            PersistenceError::Io {
+                operation,
+                path,
+                source,
+            } => DeviceIdError::Io {
+                operation: match operation {
+                    PersistenceOperation::InspectDirectory => "inspect device identity directory",
+                    PersistenceOperation::CreateDirectory => "create device identity directory",
+                    PersistenceOperation::HardenDirectory => {
+                        "harden device identity directory permissions"
+                    }
+                    PersistenceOperation::HardenFile => "harden device identity file permissions",
+                    PersistenceOperation::CreateTemporary => "create temporary device identity",
+                    PersistenceOperation::WriteTemporary => "write temporary device identity",
+                    PersistenceOperation::SyncTemporary => "sync temporary device identity",
+                },
+                path,
+                source,
+            },
+        }
     }
 }
 

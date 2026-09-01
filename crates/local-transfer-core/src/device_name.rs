@@ -3,11 +3,15 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 use directories::ProjectDirs;
 use tempfile::NamedTempFile;
+
+use crate::persistence::{
+    PersistenceError, PersistenceOperation, create_synced_temporary, harden_existing_file,
+    harden_existing_parent,
+};
 
 /// The neutral display name used until the user chooses another one.
 pub const DEFAULT_DEVICE_NAME: &str = "Local Device";
@@ -99,22 +103,27 @@ impl Error for DeviceNameValidationError {}
 #[derive(Clone, Debug)]
 pub struct DeviceNameStore {
     path: PathBuf,
+    harden_existing_parent: bool,
 }
 
 impl DeviceNameStore {
     /// Creates a store at an explicit path.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            harden_existing_parent: false,
+        }
     }
 
     /// Creates a store in the platform's application configuration directory.
     pub fn for_current_user() -> Result<Self, DeviceNameError> {
         let project_dirs = ProjectDirs::from("", "", "local-transfer")
             .ok_or(DeviceNameError::ConfigDirectoryUnavailable)?;
-        Ok(Self::new(
-            project_dirs.config_dir().join(DEVICE_NAME_FILE_NAME),
-        ))
+        Ok(Self {
+            path: project_dirs.config_dir().join(DEVICE_NAME_FILE_NAME),
+            harden_existing_parent: true,
+        })
     }
 
     /// Loads the persisted name or creates the neutral default when it is absent.
@@ -122,6 +131,10 @@ impl DeviceNameStore {
     /// Existing unreadable or invalid data is returned as an error and is never
     /// silently replaced with the default.
     pub fn load_or_create(&self) -> Result<DeviceName, DeviceNameError> {
+        if self.harden_existing_parent {
+            harden_existing_parent(&self.path).map_err(Self::persistence_error)?;
+        }
+        harden_existing_file(&self.path).map_err(Self::persistence_error)?;
         match fs::read_to_string(&self.path) {
             Ok(contents) => self.parse_persisted(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.create_default(),
@@ -170,41 +183,16 @@ impl DeviceNameStore {
     }
 
     fn write_temporary(&self, name: &DeviceName) -> Result<NamedTempFile, DeviceNameError> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| DeviceNameError::InvalidPath {
-                path: self.path.clone(),
-            })?;
-        fs::create_dir_all(parent).map_err(|source| DeviceNameError::Io {
-            operation: "create device display name directory",
-            path: parent.to_path_buf(),
-            source,
-        })?;
-
-        let mut temporary =
-            NamedTempFile::new_in(parent).map_err(|source| DeviceNameError::Io {
-                operation: "create temporary device display name",
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        writeln!(temporary, "{name}").map_err(|source| DeviceNameError::Io {
-            operation: "write temporary device display name",
-            path: temporary.path().to_path_buf(),
-            source,
-        })?;
-        temporary
-            .as_file()
-            .sync_all()
-            .map_err(|source| DeviceNameError::Io {
-                operation: "sync temporary device display name",
-                path: temporary.path().to_path_buf(),
-                source,
-            })?;
-        Ok(temporary)
+        create_synced_temporary(
+            &self.path,
+            format!("{name}\n").as_bytes(),
+            self.harden_existing_parent,
+        )
+        .map_err(Self::persistence_error)
     }
 
     fn load_existing_after_race(&self) -> Result<DeviceName, DeviceNameError> {
+        harden_existing_file(&self.path).map_err(Self::persistence_error)?;
         let contents = fs::read_to_string(&self.path).map_err(|source| {
             self.io_error("read concurrently created device display name", source)
         })?;
@@ -216,6 +204,35 @@ impl DeviceNameStore {
             operation,
             path: self.path.clone(),
             source,
+        }
+    }
+
+    fn persistence_error(error: PersistenceError) -> DeviceNameError {
+        match error {
+            PersistenceError::InvalidPath { path } => DeviceNameError::InvalidPath { path },
+            PersistenceError::Io {
+                operation,
+                path,
+                source,
+            } => DeviceNameError::Io {
+                operation: match operation {
+                    PersistenceOperation::InspectDirectory => {
+                        "inspect device display name directory"
+                    }
+                    PersistenceOperation::CreateDirectory => "create device display name directory",
+                    PersistenceOperation::HardenDirectory => {
+                        "harden device display name directory permissions"
+                    }
+                    PersistenceOperation::HardenFile => {
+                        "harden device display name file permissions"
+                    }
+                    PersistenceOperation::CreateTemporary => "create temporary device display name",
+                    PersistenceOperation::WriteTemporary => "write temporary device display name",
+                    PersistenceOperation::SyncTemporary => "sync temporary device display name",
+                },
+                path,
+                source,
+            },
         }
     }
 }
