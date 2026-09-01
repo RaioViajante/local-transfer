@@ -1,6 +1,7 @@
 //! Shared domain library for local-transfer applications.
 
 pub mod advertisement;
+pub mod browser;
 pub mod device_name;
 pub mod discovery;
 pub mod identity;

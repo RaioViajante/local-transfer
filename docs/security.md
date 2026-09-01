@@ -14,6 +14,10 @@ The `_local-transfer._tcp` TXT schema is deliberately limited to discovery-schem
 
 Each advertisement uses an opaque UUID generated from operating-system-backed cryptographic randomness for its session-only service instance and `.local.` hostname. It is never persisted and does not embed the permanent `DeviceId`, `DeviceName`, system hostname, username, network address, or hardware identifier. Name-conflict suffixes selected by the DNS-SD implementation are likewise ephemeral. The TXT record remains limited to compatibility fields and optional advisory name and OS hints; resolved addresses and the caller-owned service port stay in standard DNS-SD records rather than TXT metadata.
 
+The browser treats service fullnames, TXT entries, ports, and resolved addresses as hostile input. It exposes only schema-valid, protocol-compatible snapshots with a non-zero port and at most 16 deduplicated IPv4 or scoped IPv6 endpoints. The transient fullname exists only to correlate resolution, update, and removal events during the browser session; it is not `DeviceId`, is not persisted, and grants no trust or authorization. Removal concerns one advertisement, not permanent device identity or pairing state.
+
+Self-discovery is allowed at this layer. Runtime composition may compare a local advertisement's ephemeral session name if filtering becomes useful, but discovery never guesses self from `DeviceId`, hostnames, addresses, MAC addresses, or other machine attributes.
+
 Trust is established per device through explicit pairing. A trusted-peer record should bind a stable peer identifier to authenticated key material and the user-visible identity needed to recognize it. Trust persists until it is revoked, reset, or invalidated by an identity change. A device presenting unexpected key material must not be silently accepted as the previously trusted peer.
 
 Trusting a device authorizes authenticated communication; it does not automatically authorize every incoming file. Transfer acceptance remains a distinct user decision unless a narrowly scoped future policy explicitly changes that behavior.
