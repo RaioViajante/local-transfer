@@ -210,7 +210,9 @@ name = "local-transfer-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "local-transfer-core",
+ "windows-sys",
 ]
 
 [[package]]

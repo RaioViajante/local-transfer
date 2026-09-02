@@ -11,3 +11,11 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 local-transfer-core.workspace = true
+
+# Minimal, already-in-tree primitives for a cross-platform Ctrl+C handler that
+# only flips an AtomicBool. Avoids pulling a signal-handling crate.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

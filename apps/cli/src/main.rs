@@ -1,14 +1,19 @@
+mod discovery;
+
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use local_transfer_core::device_name::DeviceName;
 use local_transfer_core::identity::DeviceId;
 use local_transfer_core::platform::Platform;
 use local_transfer_core::{LocalDevice, LocalDeviceError, LocalDeviceManager};
+
+use discovery::{BrowserSession, DiscoverArgs, DiscoveryCliError, SignalCancellation};
 
 #[derive(Debug, Parser, PartialEq)]
 #[command(
@@ -25,6 +30,12 @@ struct Cli {
 enum Command {
     /// Show this installation's local device identity.
     Device,
+
+    /// Observe transient, unauthenticated devices advertising on the local network.
+    ///
+    /// Discovered devices are advisory only: they are not paired, trusted, or
+    /// authenticated, and their names and addresses are unverified hints.
+    Discover(DiscoverArgs),
 }
 
 #[derive(Debug)]
@@ -48,6 +59,7 @@ impl From<LocalDevice> for DeviceView {
 enum CliError {
     Load(LocalDeviceError),
     Output(io::Error),
+    Discovery(DiscoveryCliError),
 }
 
 impl fmt::Display for CliError {
@@ -55,6 +67,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Load(source) => write!(formatter, "failed to load local device: {source}"),
             Self::Output(source) => write!(formatter, "failed to write command output: {source}"),
+            Self::Discovery(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -64,6 +77,7 @@ impl Error for CliError {
         match self {
             Self::Load(source) => Some(source),
             Self::Output(source) => Some(source),
+            Self::Discovery(source) => Some(source),
         }
     }
 }
@@ -120,7 +134,17 @@ where
             writeln!(stdout, "Platform: {}", platform_label(device.platform))
                 .map_err(CliError::Output)
         }
+        Command::Discover(args) => run_discovery(&args, &mut stdout).map_err(CliError::Discovery),
     }
+}
+
+fn run_discovery<W: Write>(args: &DiscoverArgs, stdout: &mut W) -> Result<(), DiscoveryCliError> {
+    let cancel = SignalCancellation::install().map_err(DiscoveryCliError::Interrupt)?;
+    let mut session = BrowserSession::start(Duration::from_secs(args.window), cancel)
+        .map_err(DiscoveryCliError::Start)?;
+    let start = Instant::now();
+    let mut clock = || start.elapsed();
+    discovery::observe(args, &mut session, &mut clock, &cancel, stdout)
 }
 
 const fn platform_label(platform: Platform) -> &'static str {
@@ -143,7 +167,9 @@ mod tests {
     use local_transfer_core::identity::DeviceId;
     use local_transfer_core::platform::Platform;
 
-    use super::{Cli, CliError, Command, DeviceView, execute, platform_label, run_from};
+    use super::{
+        Cli, CliError, Command, DeviceView, DiscoverArgs, execute, platform_label, run_from,
+    };
 
     const DEVICE_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -163,6 +189,50 @@ mod tests {
                 command: Command::Device
             }
         );
+    }
+
+    #[test]
+    fn parses_discover_command_with_defaults() {
+        assert_eq!(
+            Cli::try_parse_from(["local-transfer", "discover"]).unwrap(),
+            Cli {
+                command: Command::Discover(DiscoverArgs {
+                    events: false,
+                    window: 3,
+                    stale_after: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_discover_events_window_and_stale_after_flags() {
+        assert_eq!(
+            Cli::try_parse_from([
+                "local-transfer",
+                "discover",
+                "--events",
+                "--window",
+                "12",
+                "--stale-after",
+                "20",
+            ])
+            .unwrap(),
+            Cli {
+                command: Command::Discover(DiscoverArgs {
+                    events: true,
+                    window: 12,
+                    stale_after: Some(20),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_discover_durations_outside_the_supported_range() {
+        assert!(Cli::try_parse_from(["local-transfer", "discover", "--window", "0"]).is_err());
+        assert!(Cli::try_parse_from(["local-transfer", "discover", "--window", "600"]).is_err());
+        assert!(Cli::try_parse_from(["local-transfer", "discover", "--stale-after", "0"]).is_err());
     }
 
     #[test]
