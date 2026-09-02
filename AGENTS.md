@@ -38,6 +38,7 @@ For every task:
 8. Run targeted checks while developing, then the complete validation suite.
 9. Review `git diff`, `git diff --check`, and `git status` for scope, correctness, and accidental changes.
 10. Commit or push only when explicitly requested and only after validation passes.
+11. When the task delivers a GitHub issue, close that issue as the final delivery step once every condition in [Issue completion](#issue-completion) is met.
 
 ## Required validation
 
@@ -52,6 +53,27 @@ git diff --check
 ```
 
 Do not claim success when a required command was skipped or failed. If an environment limitation prevents validation, report the exact limitation and command.
+
+## Issue completion
+
+A GitHub issue is not fully completed until all of the following are true:
+
+1. The implementation is complete.
+2. Required validation passes.
+3. The implementation has been reviewed and approved.
+4. The approved commit has been pushed to `origin/main`.
+5. `HEAD` matches `origin/main`.
+6. The corresponding GitHub issue has been closed.
+
+Closing the issue is the final delivery step. When closing an issue:
+
+- Use the GitHub CLI (`gh`) when it is available.
+- Confirm the mapping with `gh issue list` and `gh issue view` first, and close only the issue that corresponds to the implemented task.
+- Never guess an issue number when the mapping is ambiguous.
+- Do not close an issue when its acceptance criteria are not actually satisfied.
+- Do not close related or dependent issues automatically.
+- Do not close an issue merely because a commit exists.
+- When useful, leave a concise closing comment that references the implementation commit.
 
 ## Rust standards
 
