@@ -352,6 +352,7 @@ enum RawBrowserEvent {
     Error(DiscoveryBrowserError),
 }
 
+/// Coalesces raw resolutions into deduplicated peers keyed by transient name.
 #[derive(Default)]
 struct BrowserState {
     peers: HashMap<TransientDiscoveryKey, DiscoveredPeer>,
@@ -729,6 +730,114 @@ mod tests {
             endpoint_state.translate(RawBrowserEvent::Resolved(endpoint_change)),
             Some(DiscoveryBrowserEvent::Updated(_))
         ));
+    }
+
+    #[test]
+    fn reordered_and_duplicate_endpoints_coalesce_without_a_semantic_update() {
+        let near = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 10));
+        let far = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 20));
+        let mut state = BrowserState::default();
+
+        let mut first = resolved();
+        first.endpoints = vec![near, far];
+        let added = peer(state.translate(RawBrowserEvent::Resolved(first)).unwrap());
+        assert_eq!(added.endpoints(), &[near, far]);
+
+        let mut reordered = resolved();
+        reordered.endpoints = vec![far, near, far, near];
+        let event = state
+            .translate(RawBrowserEvent::Resolved(reordered))
+            .unwrap();
+        assert!(matches!(event, DiscoveryBrowserEvent::Refreshed(_)));
+        assert_eq!(peer(event).endpoints(), &[near, far]);
+        assert_eq!(state.peers.len(), 1);
+    }
+
+    #[test]
+    fn partially_overlapping_endpoint_sets_are_a_meaningful_update() {
+        let a = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 10));
+        let b = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 20));
+        let c = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 30));
+        let mut state = BrowserState::default();
+
+        let mut first = resolved();
+        first.endpoints = vec![a, b];
+        state.translate(RawBrowserEvent::Resolved(first));
+
+        let mut overlapping = resolved();
+        overlapping.endpoints = vec![c, b];
+        let event = state
+            .translate(RawBrowserEvent::Resolved(overlapping))
+            .unwrap();
+        assert!(matches!(event, DiscoveryBrowserEvent::Updated(_)));
+        assert_eq!(peer(event).endpoints(), &[b, c]);
+        assert_eq!(state.peers.len(), 1);
+    }
+
+    #[test]
+    fn multiple_interface_addresses_collapse_into_one_normalized_peer() {
+        let mut state = BrowserState::default();
+        let mut resolution = resolved();
+        resolution.endpoints = vec![
+            DiscoveryEndpoint::ipv6(Ipv6Addr::LOCALHOST, 2),
+            DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 2)),
+            DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+        ];
+
+        let added = peer(
+            state
+                .translate(RawBrowserEvent::Resolved(resolution))
+                .unwrap(),
+        );
+
+        assert_eq!(
+            added.endpoints(),
+            &[
+                DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 2)),
+                DiscoveryEndpoint::ipv6(Ipv6Addr::LOCALHOST, 2),
+            ]
+        );
+        assert_eq!(state.peers.len(), 1);
+    }
+
+    #[test]
+    fn advertisements_sharing_a_name_hint_remain_distinct_transient_keys() {
+        const OTHER_KEY: &str = "lt-other._local-transfer._tcp.local.";
+        let mut state = BrowserState::default();
+
+        let mut first = resolved();
+        first
+            .txt
+            .push(DiscoveryTxtEntry::new("name", "Studio").unwrap());
+        let mut second = resolved();
+        second.fullname = OTHER_KEY.to_owned();
+        second.endpoints = vec![DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 99))];
+        second
+            .txt
+            .push(DiscoveryTxtEntry::new("name", "Studio").unwrap());
+
+        assert!(matches!(
+            state.translate(RawBrowserEvent::Resolved(first)).unwrap(),
+            DiscoveryBrowserEvent::Added(_)
+        ));
+        assert!(matches!(
+            state.translate(RawBrowserEvent::Resolved(second)).unwrap(),
+            DiscoveryBrowserEvent::Added(_)
+        ));
+
+        assert_eq!(state.peers.len(), 2);
+        let first_peer = state
+            .peers
+            .get(&TransientDiscoveryKey::new(KEY).unwrap())
+            .unwrap();
+        let second_peer = state
+            .peers
+            .get(&TransientDiscoveryKey::new(OTHER_KEY).unwrap())
+            .unwrap();
+        assert_eq!(first_peer.metadata().name().unwrap().as_str(), "Studio");
+        assert_eq!(second_peer.metadata().name().unwrap().as_str(), "Studio");
+        assert_ne!(first_peer.key(), second_peer.key());
     }
 
     #[test]

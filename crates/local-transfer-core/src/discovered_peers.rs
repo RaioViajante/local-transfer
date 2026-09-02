@@ -72,6 +72,11 @@ struct PeerRecord {
 
 /// Portable state for bounded, compatible, unauthenticated discovery snapshots.
 ///
+/// Observations are correlated only by their [`TransientDiscoveryKey`], so
+/// repeated resolutions, extra interface addresses, and re-advertisement for one
+/// key collapse into a single visible snapshot and advisory name hints never
+/// merge distinct keys.
+///
 /// Times are durations on a caller-owned monotonic timeline. The state reads no
 /// clock and schedules no work. Recent absent records are retained as bounded
 /// tombstones so late observations cannot undo a newer removal or expiry.
@@ -427,6 +432,51 @@ mod tests {
             visible.endpoints()[0].address(),
             Ipv4Addr::new(192, 0, 2, 2)
         );
+    }
+
+    #[test]
+    fn duplicate_advertisement_for_one_key_never_adds_a_second_record() {
+        let mut state = DiscoveredPeerState::new();
+        state.apply(
+            DiscoveryBrowserEvent::Added(peer(KEY_A, "Desk", 1)),
+            time(1),
+        );
+        state.apply(
+            DiscoveryBrowserEvent::Added(peer(KEY_B, "Shelf", 2)),
+            time(1),
+        );
+
+        let repeat = state.apply(
+            DiscoveryBrowserEvent::Added(peer(KEY_A, "Desk", 1)),
+            time(3),
+        );
+
+        assert!(matches!(repeat, DiscoveredPeerTransition::Refreshed(_)));
+        assert_eq!(state.len(), 2);
+        assert_eq!(state.last_observed_at(&key(KEY_A)), Some(time(3)));
+        assert_eq!(state.last_observed_at(&key(KEY_B)), Some(time(1)));
+    }
+
+    #[test]
+    fn advertisements_sharing_a_name_hint_stay_two_visible_peers() {
+        let mut state = DiscoveredPeerState::new();
+        state.apply(
+            DiscoveryBrowserEvent::Added(peer(KEY_A, "Studio", 1)),
+            time(1),
+        );
+
+        let transition = state.apply(
+            DiscoveryBrowserEvent::Added(peer(KEY_B, "Studio", 2)),
+            time(1),
+        );
+
+        assert!(matches!(transition, DiscoveredPeerTransition::Appeared(_)));
+        assert_eq!(state.len(), 2);
+        let first = state.get(&key(KEY_A)).unwrap();
+        let second = state.get(&key(KEY_B)).unwrap();
+        assert_eq!(first.metadata().name().unwrap().as_str(), "Studio");
+        assert_eq!(second.metadata().name().unwrap().as_str(), "Studio");
+        assert_ne!(first.key(), second.key());
     }
 
     #[test]
