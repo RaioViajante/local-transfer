@@ -3,6 +3,7 @@
 pub mod advertisement;
 pub mod browser;
 pub mod device_name;
+pub mod discovered_peers;
 pub mod discovery;
 pub mod identity;
 mod local_device;

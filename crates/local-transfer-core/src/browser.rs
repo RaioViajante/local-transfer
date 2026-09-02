@@ -143,6 +143,23 @@ impl DiscoveredPeer {
     pub const fn protocol_major(&self) -> u16 {
         self.protocol_major
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        key: TransientDiscoveryKey,
+        metadata: DiscoveryMetadata,
+        port: NonZeroU16,
+        endpoints: Vec<DiscoveryEndpoint>,
+        protocol_major: u16,
+    ) -> Self {
+        Self {
+            key,
+            metadata,
+            port,
+            endpoints,
+            protocol_major,
+        }
+    }
 }
 
 /// The category of a browsing or remote-resolution failure.
@@ -277,6 +294,8 @@ pub enum DiscoveryBrowserEvent {
     Added(DiscoveredPeer),
     /// Meaningful validated state changed for an already resolved advertisement.
     Updated(DiscoveredPeer),
+    /// An equivalent valid resolution refreshed advertisement liveness.
+    Refreshed(DiscoveredPeer),
     /// A previously resolved advertisement is no longer visible.
     Removed(TransientDiscoveryKey),
     /// A daemon, lifecycle, or hostile-input failure occurred.
@@ -406,7 +425,7 @@ impl BrowserState {
         };
 
         match self.peers.get(&key) {
-            Some(previous) if previous == &peer => Ok(None),
+            Some(previous) if previous == &peer => Ok(Some(DiscoveryBrowserEvent::Refreshed(peer))),
             Some(_) => {
                 self.peers.insert(key, peer.clone());
                 Ok(Some(DiscoveryBrowserEvent::Updated(peer)))
@@ -647,7 +666,9 @@ mod tests {
 
     fn peer(event: DiscoveryBrowserEvent) -> DiscoveredPeer {
         match event {
-            DiscoveryBrowserEvent::Added(peer) | DiscoveryBrowserEvent::Updated(peer) => peer,
+            DiscoveryBrowserEvent::Added(peer)
+            | DiscoveryBrowserEvent::Updated(peer)
+            | DiscoveryBrowserEvent::Refreshed(peer) => peer,
             _ => panic!("expected resolved peer event"),
         }
     }
@@ -666,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_resolution_adds_once_and_meaningful_changes_update() {
+    fn valid_resolution_adds_refreshes_and_meaningful_changes_update() {
         let mut initial_state = BrowserState::default();
         let first = initial_state
             .translate(RawBrowserEvent::Resolved(resolved()))
@@ -675,11 +696,10 @@ mod tests {
         assert_eq!(first_peer.key().as_str(), KEY);
         assert_eq!(first_peer.port(), 4242);
         assert_eq!(first_peer.protocol_major(), 1);
-        assert!(
-            initial_state
-                .translate(RawBrowserEvent::Resolved(resolved()))
-                .is_none()
-        );
+        assert!(matches!(
+            initial_state.translate(RawBrowserEvent::Resolved(resolved())),
+            Some(DiscoveryBrowserEvent::Refreshed(_))
+        ));
 
         let mut metadata_state = BrowserState::default();
         metadata_state.translate(RawBrowserEvent::Resolved(resolved()));
