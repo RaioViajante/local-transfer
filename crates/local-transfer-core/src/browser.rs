@@ -644,6 +644,10 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::discovered_peers::{
+        DiscoveredPeerNoopReason, DiscoveredPeerRemovalReason, DiscoveredPeerState,
+        DiscoveredPeerTransition,
+    };
     use crate::discovery::{DiscoveryNameHint, DiscoveryPlatformHint};
 
     const KEY: &str = "lt-session._local-transfer._tcp.local.";
@@ -1074,5 +1078,320 @@ mod tests {
             drop(session);
             assert_eq!(state.borrow().drops, 1);
         }
+    }
+
+    fn seconds(value: u64) -> Duration {
+        Duration::from_secs(value)
+    }
+
+    fn assert_rejection(
+        transition: &Option<DiscoveredPeerTransition>,
+        expected: DiscoveryBrowserErrorKind,
+    ) {
+        match transition {
+            Some(DiscoveredPeerTransition::Rejected(error)) => assert_eq!(error.kind(), expected),
+            other => panic!("expected {expected:?} rejection, got {other:?}"),
+        }
+    }
+
+    /// Drives a fake browser backend end to end into discovery lifecycle state.
+    ///
+    /// Every raw backend event is polled through a real [`BrowserSession`], and
+    /// the translated browser event, when any, is applied to one
+    /// [`DiscoveredPeerState`] at the caller-supplied time. No clock, sleep, or
+    /// socket is involved, so the whole pipeline stays deterministic.
+    fn run_discovery_pipeline(
+        steps: Vec<(RawBrowserEvent, Duration)>,
+    ) -> (DiscoveredPeerState, Vec<Option<DiscoveredPeerTransition>>) {
+        let backend_state = Rc::new(RefCell::new(FakeState::default()));
+        let times: Vec<Duration> = steps.iter().map(|(_, at)| *at).collect();
+        {
+            let mut queue = backend_state.borrow_mut();
+            for (raw, _) in steps {
+                queue.events.push_back(raw);
+            }
+        }
+
+        let mut session = BrowserSession::start(FakeBackend::start(backend_state)).unwrap();
+        let mut lifecycle = DiscoveredPeerState::new();
+        let mut transitions = Vec::with_capacity(times.len());
+        for observed_at in times {
+            let transition = session
+                .poll_event()
+                .map(|event| lifecycle.apply(event, observed_at));
+            transitions.push(transition);
+        }
+
+        assert!(
+            session.poll_event().is_none(),
+            "the fake backend queue must be fully drained"
+        );
+        session.stop().unwrap();
+        (lifecycle, transitions)
+    }
+
+    #[test]
+    fn browse_to_lifecycle_covers_appear_refresh_and_update() {
+        let a = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 1));
+        let b = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 2));
+        let c = DiscoveryEndpoint::ipv4(Ipv4Addr::new(192, 0, 2, 3));
+        let with_endpoints = |endpoints: Vec<DiscoveryEndpoint>| {
+            let mut resolution = resolved();
+            resolution.endpoints = endpoints;
+            resolution
+        };
+        let renamed = |endpoints: Vec<DiscoveryEndpoint>| {
+            let mut resolution = with_endpoints(endpoints);
+            resolution
+                .txt
+                .push(DiscoveryTxtEntry::new("name", "Kitchen").unwrap());
+            resolution
+        };
+
+        let (state, transitions) = run_discovery_pipeline(vec![
+            (
+                RawBrowserEvent::Resolved(with_endpoints(vec![a, b])),
+                seconds(1),
+            ),
+            (
+                RawBrowserEvent::Resolved(with_endpoints(vec![a, b])),
+                seconds(3),
+            ),
+            (
+                RawBrowserEvent::Resolved(with_endpoints(vec![b, a, a, b])),
+                seconds(5),
+            ),
+            (
+                RawBrowserEvent::Resolved(with_endpoints(vec![b, c])),
+                seconds(7),
+            ),
+            (RawBrowserEvent::Resolved(renamed(vec![b, c])), seconds(9)),
+        ]);
+
+        assert!(matches!(
+            transitions.as_slice(),
+            [
+                Some(DiscoveredPeerTransition::Appeared(_)),
+                Some(DiscoveredPeerTransition::Refreshed(_)),
+                Some(DiscoveredPeerTransition::Refreshed(_)),
+                Some(DiscoveredPeerTransition::Updated(_)),
+                Some(DiscoveredPeerTransition::Updated(_)),
+            ]
+        ));
+        assert_eq!(state.len(), 1);
+        let peer = state
+            .get(&TransientDiscoveryKey::new(KEY).unwrap())
+            .unwrap();
+        assert_eq!(peer.endpoints(), &[b, c]);
+        assert_eq!(peer.metadata().name().unwrap().as_str(), "Kitchen");
+    }
+
+    #[test]
+    fn browse_to_lifecycle_expiry_uses_caller_supplied_time() {
+        let (mut state, transitions) = run_discovery_pipeline(vec![
+            (RawBrowserEvent::Resolved(resolved()), seconds(1)),
+            (RawBrowserEvent::Resolved(resolved()), seconds(8)),
+        ]);
+
+        assert!(matches!(
+            transitions.as_slice(),
+            [
+                Some(DiscoveredPeerTransition::Appeared(_)),
+                Some(DiscoveredPeerTransition::Refreshed(_)),
+            ]
+        ));
+        assert_eq!(state.len(), 1);
+
+        // The refresh advanced liveness to t=8, so t=12 is only four seconds stale.
+        assert!(state.expire(seconds(12), seconds(5)).is_empty());
+        assert_eq!(state.len(), 1);
+
+        let expired = state.expire(seconds(14), seconds(5));
+        assert!(matches!(
+            expired.as_slice(),
+            [DiscoveredPeerTransition::Removed {
+                reason: DiscoveredPeerRemovalReason::Expired,
+                ..
+            }]
+        ));
+        assert!(state.is_empty());
+
+        // Expiring already-absent state stays a deterministic no-op.
+        assert!(state.expire(seconds(99), seconds(1)).is_empty());
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn browse_to_lifecycle_removal_absent_and_stale_are_deterministic() {
+        let (state, transitions) = run_discovery_pipeline(vec![
+            // Removal of a never-seen advertisement produces no browser event at all.
+            (RawBrowserEvent::Removed(KEY.to_owned()), seconds(1)),
+            // Normal appearance and explicit removal.
+            (RawBrowserEvent::Resolved(resolved()), seconds(5)),
+            (RawBrowserEvent::Removed(KEY.to_owned()), seconds(8)),
+            // A second removal is coalesced away by the browser before lifecycle state.
+            (RawBrowserEvent::Removed(KEY.to_owned()), seconds(9)),
+            // An observation that predates the removal cannot resurrect the peer.
+            (RawBrowserEvent::Resolved(resolved()), seconds(7)),
+            // A later observation makes the transient advertisement visible again.
+            (RawBrowserEvent::Resolved(resolved()), seconds(12)),
+        ]);
+
+        assert!(matches!(
+            transitions.as_slice(),
+            [
+                None,
+                Some(DiscoveredPeerTransition::Appeared(_)),
+                Some(DiscoveredPeerTransition::Removed {
+                    reason: DiscoveredPeerRemovalReason::Explicit,
+                    ..
+                }),
+                None,
+                Some(DiscoveredPeerTransition::Noop {
+                    reason: DiscoveredPeerNoopReason::Stale,
+                    ..
+                }),
+                Some(DiscoveredPeerTransition::Appeared(_)),
+            ]
+        ));
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn browse_to_lifecycle_rejects_invalid_observations_without_touching_visible_state() {
+        let missing_schema = || {
+            let mut resolution = resolved();
+            resolution.txt.remove(0); // drop the required `dv` entry
+            resolution
+        };
+        let unsupported_schema = || {
+            let mut resolution = resolved();
+            resolution.txt[0] = DiscoveryTxtEntry::new("dv", "2").unwrap();
+            resolution
+        };
+        let incompatible_protocol = || {
+            let mut resolution = resolved();
+            resolution.txt = txt_with_range(2, 2);
+            resolution
+        };
+        let zero_port = || {
+            let mut resolution = resolved();
+            resolution.port = 0;
+            resolution
+        };
+        let too_many_endpoints = || {
+            let mut resolution = resolved();
+            resolution.endpoints = (1..=MAX_DISCOVERED_ENDPOINTS + 1)
+                .map(|last| DiscoveryEndpoint::ipv4(Ipv4Addr::new(198, 51, 100, last as u8)))
+                .collect();
+            resolution
+        };
+
+        let (mut state, transitions) = run_discovery_pipeline(vec![
+            (RawBrowserEvent::Resolved(resolved()), seconds(1)),
+            (RawBrowserEvent::Resolved(missing_schema()), seconds(2)),
+            (RawBrowserEvent::Resolved(unsupported_schema()), seconds(3)),
+            (
+                RawBrowserEvent::Resolved(incompatible_protocol()),
+                seconds(4),
+            ),
+            (RawBrowserEvent::Resolved(zero_port()), seconds(5)),
+            (RawBrowserEvent::Resolved(too_many_endpoints()), seconds(6)),
+        ]);
+
+        assert!(matches!(
+            &transitions[0],
+            Some(DiscoveredPeerTransition::Appeared(_))
+        ));
+        assert_rejection(&transitions[1], DiscoveryBrowserErrorKind::Metadata);
+        assert_rejection(&transitions[2], DiscoveryBrowserErrorKind::Metadata);
+        assert_rejection(
+            &transitions[3],
+            DiscoveryBrowserErrorKind::IncompatibleProtocol,
+        );
+        assert_rejection(&transitions[4], DiscoveryBrowserErrorKind::InvalidPort);
+        assert_rejection(&transitions[5], DiscoveryBrowserErrorKind::EndpointLimit);
+
+        assert_eq!(state.len(), 1);
+        // Liveness never advanced past the only valid observation at t=1.
+        let expired = state.expire(seconds(10), seconds(9));
+        assert!(matches!(
+            expired.as_slice(),
+            [DiscoveredPeerTransition::Removed {
+                reason: DiscoveredPeerRemovalReason::Expired,
+                ..
+            }]
+        ));
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn browse_to_lifecycle_keeps_same_name_advertisements_distinct() {
+        const KEY_TWO: &str = "lt-second._local-transfer._tcp.local.";
+        let named = |fullname: &str, last_octet: u8| {
+            let mut resolution = resolved();
+            resolution.fullname = fullname.to_owned();
+            resolution.endpoints = vec![DiscoveryEndpoint::ipv4(Ipv4Addr::new(
+                192, 0, 2, last_octet,
+            ))];
+            resolution
+                .txt
+                .push(DiscoveryTxtEntry::new("name", "Studio").unwrap());
+            resolution
+        };
+
+        let (state, transitions) = run_discovery_pipeline(vec![
+            (RawBrowserEvent::Resolved(named(KEY, 1)), seconds(1)),
+            (RawBrowserEvent::Resolved(named(KEY_TWO, 2)), seconds(1)),
+        ]);
+
+        assert!(matches!(
+            transitions.as_slice(),
+            [
+                Some(DiscoveredPeerTransition::Appeared(_)),
+                Some(DiscoveredPeerTransition::Appeared(_)),
+            ]
+        ));
+        assert_eq!(state.len(), 2);
+        let first = state
+            .get(&TransientDiscoveryKey::new(KEY).unwrap())
+            .unwrap();
+        let second = state
+            .get(&TransientDiscoveryKey::new(KEY_TWO).unwrap())
+            .unwrap();
+        assert_eq!(first.metadata().name().unwrap().as_str(), "Studio");
+        assert_eq!(second.metadata().name().unwrap().as_str(), "Studio");
+        assert_ne!(first.key(), second.key());
+    }
+
+    #[test]
+    fn browse_to_lifecycle_propagates_typed_adapter_failure() {
+        let (mut state, transitions) = run_discovery_pipeline(vec![
+            (RawBrowserEvent::Resolved(resolved()), seconds(1)),
+            (
+                RawBrowserEvent::Error(DiscoveryBrowserError::without_source(
+                    DiscoveryBrowserErrorKind::Daemon,
+                )),
+                seconds(2),
+            ),
+        ]);
+
+        assert!(matches!(
+            &transitions[0],
+            Some(DiscoveredPeerTransition::Appeared(_))
+        ));
+        assert_rejection(&transitions[1], DiscoveryBrowserErrorKind::Daemon);
+
+        assert_eq!(state.len(), 1);
+        // The adapter failure did not refresh the visible peer.
+        let expired = state.expire(seconds(11), seconds(10));
+        assert!(matches!(
+            expired.as_slice(),
+            [DiscoveredPeerTransition::Removed {
+                reason: DiscoveredPeerRemovalReason::Expired,
+                ..
+            }]
+        ));
+        assert!(state.is_empty());
     }
 }
