@@ -189,6 +189,14 @@ No attempt state except a successful `Committing` may create persistent trust.
 Every terminal failure state leaves **no** trusted-peer record and no partial
 trust.
 
+The initiator side of the request phase — the move from `Started` toward
+`AwaitingAuthentication` — is implemented in `pairing::PairingRequest`
+(see [protocol.md](protocol.md)). Its concrete states and message validation
+live in code; it establishes no trust, runs no cryptography, and persists
+nothing, so it does not change the contract above. Completing that phase
+corresponds only to "the attempt may proceed to the next authenticated stage",
+never to any state at or beyond `AwaitingUserVerification`.
+
 ### 4. User-verifiable step
 
 Before trust is established the user must take an explicit, affirmative

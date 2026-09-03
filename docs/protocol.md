@@ -48,6 +48,18 @@ Portable core discovery state consumes these validated browser events with calle
 
 Repeated pairing requests must be bounded, and a retry starts a fresh untrusted attempt that inherits no state from a failed one. The core state machine for the pairing attempt, trusted-peer records, identity-change detection and recovery, and local reset versus revocation is specified in [trust.md](trust.md). Key rotation semantics still need to be resolved before the pairing protocol is finalized.
 
+### Initiator request phase
+
+The first phase of a pairing attempt is the initiator asking a currently untrusted device to begin pairing. `local-transfer-core` implements the initiator side (`pairing::PairingRequest`) as a deterministic state machine that reads no clock and performs no cryptography.
+
+- The initiator creates the attempt only from an explicit local action, which supplies just a deadline. The initiator core mints a fresh transient 16-byte correlation token for each new attempt; the caller neither chooses nor reuses it, so every retry is a new, independent attempt. The token correlates the phase's messages and is never a peer identity, a credential, or trust. No discovered-peer, address, hostname, or discovery-key value is part of the attempt state; addressing the target is the caller's responsibility.
+- Three bounded messages are defined, each carrying an explicit one-byte protocol version and the attempt identifier: a pairing request, a request acceptance, and a request rejection with a small closed reason (`unspecified`, `busy`, or `declined`). Messages are validated for length, version, kind, per-kind length, and reason before they reach the state machine. Malformed, oversized, truncated, unsupported, or role-inappropriate input fails the attempt closed.
+- A response referencing a different attempt identifier is ignored without disturbing the attempt. Duplicate, reordered, or late messages never revive a terminal attempt. The deadline is evaluated only against caller-supplied monotonic time, so a response at or after the deadline times the attempt out instead of resolving it.
+- Timeout, cancellation, remote rejection, and protocol failure are terminal and leave nothing behind. A retry is a brand-new attempt with its own identifier and deadline; no state carries over, and nothing shortcuts later user initiation, authentication, or verification.
+- The successful terminal state means only that the attempt may proceed to the next, authenticated pairing stage. It is not trust, authentication, verification, or transfer authorization. An active attacker able to answer the request still cannot pass the later authenticated, user-verified stage, and this phase creates and persists nothing.
+
+The authenticated key agreement, the short-authentication-string comparison, the responder-side state, and trusted-peer persistence remain separate issues. The message framing above is intentionally minimal and provisional, not the project's final wire format.
+
 ## Connection lifecycle
 
 After pairing, a device may open a direct connection to a discovered or otherwise known endpoint. The secure transport handshake must authenticate the endpoint against the stored peer binding. A valid network route and a valid TLS handshake are both necessary; neither is sufficient without the expected peer identity.

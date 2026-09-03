@@ -7,6 +7,7 @@ pub mod discovered_peers;
 pub mod discovery;
 pub mod identity;
 mod local_device;
+pub mod pairing;
 pub mod platform;
 
 mod persistence;
