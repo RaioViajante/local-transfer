@@ -37,6 +37,8 @@ This is a target layout, not a commitment to create every directory during the d
 
 Platform-specific behavior should sit behind narrow interfaces. The core may depend on portable libraries and explicit platform adapters, but it must not depend on either user interface. Keeping domain state transitions in one place prevents security and behavioral differences between the CLI and desktop application.
 
+The trusted-peer model and the pairing state machine are security-sensitive core responsibilities. [trust.md](trust.md) specifies what belongs to the core, what the transport/crypto adapter provides, and what the UI and persistence adapters own.
+
 ### Local device identifier
 
 The installation identifier is a canonical UUID version 4 generated from operating-system randomness. The core stores it as `device-id` in the platform application configuration directory and also accepts an explicit storage path for isolated tests and future host adapters. Initial creation uses a fully written temporary file and a no-clobber persist operation so concurrent initialization cannot replace an established identity. Existing unreadable or invalid data is an error and is never silently regenerated.

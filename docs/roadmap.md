@@ -31,6 +31,8 @@ Exit condition: two instances can locate one another on representative macOS, Wi
 
 ## Phase 3: Pairing
 
+The trusted-peer and pairing-lifecycle specification is [trust.md](trust.md); this phase implements it.
+
 - Select and document an established pairing construction and verification UX.
 - Implement explicit accept, reject, timeout, retry limits, persistence, and revocation.
 - Bind stable peer identity to authenticated public-key material.

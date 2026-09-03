@@ -33,6 +33,7 @@ local-transfer/
 
 - [Architecture](docs/architecture.md)
 - [Security](docs/security.md)
+- [Trust and pairing](docs/trust.md)
 - [Protocol](docs/protocol.md)
 - [CLI](docs/cli.md)
 - [Desktop](docs/desktop.md)

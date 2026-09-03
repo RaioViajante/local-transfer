@@ -11,7 +11,7 @@ This file is the canonical, tool-agnostic policy for AI coding agents in this re
 - Prefer idiomatic, maintainable Rust and clear ownership over cleverness.
 - Reuse the standard library and existing dependencies where practical; keep resource use and dependency growth bounded.
 
-The threat model and unresolved design decisions in [README.md](README.md), [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), and [docs/protocol.md](docs/protocol.md) are authoritative. Do not turn planned behavior into an implementation convention prematurely.
+The threat model and unresolved design decisions in [README.md](README.md), [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), [docs/trust.md](docs/trust.md), and [docs/protocol.md](docs/protocol.md) are authoritative. Do not turn planned behavior into an implementation convention prematurely.
 
 ## Repository architecture
 
@@ -20,7 +20,7 @@ This is a Rust 2024 workspace with Rust 1.85 as its minimum supported version.
 - `crates/local-transfer-core`: shared domain library. It owns local device identity, display-name and platform models, private filesystem persistence, bounded discovery metadata, DNS-SD advertisement, and DNS-SD browsing. Public modules expose small typed APIs; infrastructure adapters and persistence details remain private.
 - `apps/cli`: Clap-based `local-transfer` binary and terminal adapter. It currently exposes the `device` command and translates core results into stdout, stderr, and exit codes. Domain behavior belongs in the core rather than the CLI.
 - `apps/desktop`: reserved for the future Tauri/React application; it is not currently a workspace member or an initialized application. Follow its README and `docs/desktop.md` without creating planned components unless the task requires them.
-- `docs`: architecture, security, protocol, CLI, desktop, and roadmap decisions. Cross-reference these documents instead of duplicating them.
+- `docs`: architecture, security, trust and pairing, protocol, CLI, desktop, and roadmap decisions. Cross-reference these documents instead of duplicating them.
 
 Dependencies point from applications toward `local-transfer-core`; the core must not depend on UI frameworks or presentation types. Current APIs are synchronous, with nonblocking polling for discovery events. Network and lifecycle effects are hidden behind narrow internal backends so state transitions can be tested deterministically.
 

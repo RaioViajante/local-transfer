@@ -10,7 +10,7 @@ The initial transport direction is a direct LAN TCP connection secured with TLS 
 
 Either device may discover, pair with, send to, or receive from another device. “Sender” and “receiver” describe one transfer rather than permanent roles.
 
-A device has a stable local identity backed by cryptographic key material. Human-readable names are labels and may collide or change; they must not be used as security identities. A network endpoint is transient and must not be the sole identity of a trusted peer.
+A device has a stable local identity backed by cryptographic key material. This is distinct from `DeviceId`, which is local installation bookkeeping, is never transmitted, and is never the identity a trusted-peer record binds to. Human-readable names are labels and may collide or change; they must not be used as security identities. A network endpoint is transient and must not be the sole identity of a trusted peer. [trust.md](trust.md) specifies how a trusted-peer record binds to authenticated key identity.
 
 ## Discovery lifecycle
 
@@ -46,7 +46,7 @@ Portable core discovery state consumes these validated browser events with calle
 5. The trust record is stored locally and the outcome is reported to both interfaces.
 6. Rejection, timeout, mismatch, or protocol failure produces no trusted relationship and leaves no ambiguous partial state.
 
-Repeated pairing requests must be bounded. Re-pairing, identity reset, revocation, and key rotation need explicit semantics before the pairing protocol is finalized.
+Repeated pairing requests must be bounded, and a retry starts a fresh untrusted attempt that inherits no state from a failed one. The core state machine for the pairing attempt, trusted-peer records, identity-change detection and recovery, and local reset versus revocation is specified in [trust.md](trust.md). Key rotation semantics still need to be resolved before the pairing protocol is finalized.
 
 ## Connection lifecycle
 
@@ -84,7 +84,7 @@ Later protocol work may add multiple files, directories, clipboard/text payloads
 ## Open protocol decisions
 
 - Message framing and serialization format.
-- Pairing construction and user-verification experience.
+- Pairing construction and user-verification experience (trust-state semantics are settled in [trust.md](trust.md)).
 - TLS identity representation and pinning mechanism.
 - Capability and version negotiation rules.
 - Per-transfer integrity and optional resumability.
