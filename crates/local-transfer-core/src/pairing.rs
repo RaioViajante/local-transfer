@@ -1,23 +1,32 @@
-//! Initiator-side pairing-request phase.
+//! Pairing-request phase: initiator and responder.
 //!
-//! This module implements only the first phase of a pairing attempt: an
-//! explicit, local decision to request pairing from a currently untrusted
-//! device, the small bounded messages that phase exchanges, and the
-//! deterministic initiator state machine that tracks it.
+//! This module implements only the first phase of a pairing attempt — an
+//! explicit, local decision to begin pairing between two currently untrusted
+//! devices — as two deterministic state machines that share one small bounded
+//! wire message family:
 //!
-//! Reaching the successful terminal state,
-//! [`PairingRequestState::ReadyForNextPairingStage`], means only that the
-//! attempt may proceed to the next, authenticated pairing stage. It never means
-//! the remote device is trusted, authenticated, verified, or authorized for any
-//! transfer. There is no trusted-peer record anywhere in this module, nothing
-//! here is persisted, and no cryptography is performed. The authenticated key
-//! agreement and the user-verifiable step are separate issues; see
-//! `docs/trust.md` and `docs/protocol.md`.
+//! - [`PairingRequest`]: the initiator asks a device to begin pairing.
+//! - [`PairingResponse`]: the responder presents an incoming request for an
+//!   explicit local decision and emits the accept or reject reply.
 //!
-//! The state machine reads no clock: callers supply monotonic [`Duration`]
-//! values and an explicit deadline. It never retries on its own. A retry is a
-//! brand-new [`PairingRequest`] created by another explicit initiation, sharing
-//! no state with the previous attempt.
+//! Reaching either machine's successful terminal state
+//! (`…State::ReadyForNextPairingStage`) means only that this side finished its
+//! local request-phase work and the attempt may proceed to the next,
+//! authenticated pairing stage. Neither side asserts that the remote received
+//! anything: for the initiator it is having received a valid acceptance reply,
+//! for the responder it is the caller reporting a successful local transport
+//! send of its acceptance reply. It never means the remote device is trusted,
+//! authenticated, verified, or authorized for any transfer. There is no
+//! trusted-peer record anywhere in this module, nothing here is persisted, and
+//! no cryptography is performed. The authenticated key agreement, the
+//! user-verifiable step, and any cryptographic-identity or SAS mismatch are
+//! separate later issues; see `docs/trust.md` and `docs/protocol.md`.
+//!
+//! Both machines read no clock: callers supply monotonic [`Duration`] values and
+//! an explicit deadline. Neither retries on its own. A retry is a brand-new
+//! state-machine object — the initiator calls [`PairingRequest::initiate`]
+//! again, the responder builds a new [`PairingResponse`] from a fresh incoming
+//! request — sharing no state with the previous attempt.
 
 use std::error::Error;
 use std::fmt;
@@ -151,11 +160,9 @@ impl fmt::Display for PairingRejectionReason {
 /// attempt identifier. These are the only messages this phase defines; the
 /// authenticated handshake and the user-verification exchange are later issues.
 ///
-/// This is crate-internal: the initiator's transport shuttles opaque bytes
-/// through [`PairingRequest::request_message`] and
-/// [`PairingRequest::handle_remote_message`], which own encoding and validation.
-/// The message type becomes part of the public API when the responder side
-/// (issue #19) needs it.
+/// This is crate-internal. Transports shuttle opaque bytes through
+/// [`PairingRequest`] and [`PairingResponse`], which own encoding and
+/// validation; adapters never see this enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PairingMessage {
     /// Initiator to responder: a request to begin pairing.
@@ -178,25 +185,19 @@ pub(crate) enum PairingMessage {
 }
 
 impl PairingMessage {
-    /// Builds a pairing request for an attempt.
+    /// Builds a pairing request (initiator to responder).
     #[must_use]
     const fn request(attempt_id: PairingAttemptId) -> Self {
         Self::Request { attempt_id }
     }
 
-    /// Builds a request-accepted message. The initiator only ever receives this
-    /// message, so the constructor exists for tests until the responder side
-    /// (issue #19) needs it.
-    #[cfg(test)]
+    /// Builds a request-accepted reply (responder to initiator).
     #[must_use]
     const fn accepted(attempt_id: PairingAttemptId) -> Self {
         Self::RequestAccepted { attempt_id }
     }
 
-    /// Builds a request-rejected message. The initiator only ever receives this
-    /// message, so the constructor exists for tests until the responder side
-    /// (issue #19) needs it.
-    #[cfg(test)]
+    /// Builds a request-rejected reply (responder to initiator).
     #[must_use]
     const fn rejected(attempt_id: PairingAttemptId, reason: PairingRejectionReason) -> Self {
         Self::RequestRejected { attempt_id, reason }
@@ -561,7 +562,11 @@ impl PairingRequest {
         }
     }
 
-    /// Records that the request was handed to the transport for delivery.
+    /// Records that the caller handed the request to its transport for sending.
+    ///
+    /// This is a local handoff only; it does not mean the responder received the
+    /// request. The initiator reaches readiness only on receiving a valid
+    /// `request-accepted` reply.
     pub fn mark_request_sent(&mut self, now: Duration) -> PairingRequestEvent {
         if let Some(event) = self.short_circuit(now) {
             return event;
@@ -654,6 +659,324 @@ impl PairingRequest {
     fn fail(&mut self, failure: PairingRequestFailure) -> PairingRequestEvent {
         self.state = PairingRequestState::Failed(failure);
         PairingRequestEvent::Failed(failure)
+    }
+}
+
+/// A validated incoming pairing request could not start a responder attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingResponseError {
+    /// The bytes were not a valid, supported pairing message.
+    Protocol(PairingMessageError),
+    /// The message decoded but is not a pairing request. The responder starts
+    /// only from a request; an accept or reject reply cannot begin an attempt.
+    NotARequest,
+}
+
+impl fmt::Display for PairingResponseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Protocol(source) => {
+                write!(formatter, "invalid incoming pairing request: {source}")
+            }
+            Self::NotARequest => formatter.write_str(
+                "the message is not a pairing request and cannot start a responder attempt",
+            ),
+        }
+    }
+}
+
+impl Error for PairingResponseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Protocol(source) => Some(source),
+            Self::NotARequest => None,
+        }
+    }
+}
+
+/// Why an input to the responder state machine was a deterministic no-op.
+///
+/// An ignored input never changes state and never advances the attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingResponseIgnored {
+    /// The attempt is already in a terminal state; later input cannot revive it.
+    AlreadyResolved,
+    /// A local decision (accept or reject) has already been made.
+    DecisionAlreadyMade,
+    /// The request has not been accepted, so there is no reply to mark sent.
+    NoAcceptedReply,
+}
+
+/// The responder's position in the pairing-request phase.
+///
+/// `ReadyForNextPairingStage`, `Rejected`, `Cancelled`, `TimedOut`, and `Failed`
+/// are terminal. None of them is trust: `ReadyForNextPairingStage` only means
+/// this side finished its local request-phase work and may proceed to the next,
+/// authenticated stage. No state asserts that the initiator received anything.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingResponseState {
+    /// A valid request is presented and awaits an explicit local decision.
+    AwaitingDecision,
+    /// The user accepted; the bounded acceptance reply was produced and still
+    /// needs a successful local transport send before this side may proceed.
+    AcceptedAwaitingSend,
+    /// The caller reported the acceptance reply's local transport send
+    /// succeeded. This responder finished its local request-phase obligations
+    /// and may proceed to the authenticated stage; it does not assert the
+    /// initiator received the reply.
+    ReadyForNextPairingStage,
+    /// The user rejected, with a bounded protocol reason. Terminal.
+    Rejected(PairingRejectionReason),
+    /// The local user cancelled, or the attempt was interrupted. Terminal.
+    Cancelled,
+    /// The deadline elapsed before the phase completed. Terminal.
+    TimedOut,
+    /// The attempt failed closed: the acceptance reply could not be sent through
+    /// the local transport. Terminal.
+    Failed,
+}
+
+/// The outcome of applying one input to a [`PairingResponse`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
+pub enum PairingResponseEvent {
+    /// The attempt is still awaiting a step and within its deadline.
+    Pending,
+    /// The user accepted. The bytes are the bounded `request-accepted` reply to
+    /// send; call [`PairingResponse::mark_reply_sent`] once the local transport
+    /// send of those bytes succeeds. Accepting is not trust: it is only local
+    /// willingness to continue to the next authenticated stage.
+    Accepted(Vec<u8>),
+    /// The user rejected. The bytes are the bounded `request-rejected` reply to
+    /// send; the attempt is already terminal whether or not the send succeeds or
+    /// the initiator receives it.
+    Rejected(Vec<u8>),
+    /// The caller reported the acceptance reply's local transport send
+    /// succeeded; this side may proceed to the next, authenticated pairing
+    /// stage. Remote receipt is not claimed.
+    ReadyForNextPairingStage,
+    /// The local user cancelled or the attempt was interrupted.
+    Cancelled,
+    /// The deadline elapsed.
+    TimedOut,
+    /// The attempt failed closed (the acceptance reply could not be sent through
+    /// the local transport).
+    Failed,
+    /// The input was a deterministic no-op.
+    Ignored(PairingResponseIgnored),
+}
+
+/// The responder-side state machine for one incoming pairing request.
+///
+/// The attempt is transient and in-memory. It owns only the correlation
+/// identifier echoed from the request, the caller-supplied deadline, and its
+/// current state: no key, fingerprint, trusted-peer record, storage handle,
+/// endpoint, hostname, discovery snapshot, or peer name. It is never persisted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingResponse {
+    attempt_id: PairingAttemptId,
+    deadline: Duration,
+    state: PairingResponseState,
+}
+
+impl PairingResponse {
+    /// Presents a validated incoming pairing request for an explicit local
+    /// decision.
+    ///
+    /// `request` is untrusted network input: it is length-bounded, decoded,
+    /// version-checked, and kind-checked before any responder state exists. Only
+    /// a `request` message starts an attempt — an accept or reject reply yields
+    /// [`PairingResponseError::NotARequest`], and malformed, oversized,
+    /// truncated, or unsupported input yields [`PairingResponseError::Protocol`].
+    /// The attempt's correlation identifier is taken from the validated request
+    /// and echoed, unchanged, into the reply; it is never a peer identity, a
+    /// credential, or trust.
+    ///
+    /// Discovery hints (display name, hostname, address, endpoint, discovery
+    /// key) are routing/presentation metadata the caller holds separately; they
+    /// are deliberately not part of responder state and cannot start an attempt.
+    ///
+    /// `deadline` is a value on the caller's monotonic timeline after which the
+    /// attempt times out; this module chooses no timeout constant. Construction
+    /// consults no clock and does not prove the deadline is still live: the first
+    /// time-aware call ([`accept`](Self::accept), [`reject`](Self::reject),
+    /// [`mark_reply_sent`](Self::mark_reply_sent), [`check_deadline`](Self::check_deadline))
+    /// applies `now >= deadline` and times the attempt out, so an already-expired
+    /// object can exist but can never decide or progress.
+    pub fn from_request(request: &[u8], deadline: Duration) -> Result<Self, PairingResponseError> {
+        match PairingMessage::decode(request).map_err(PairingResponseError::Protocol)? {
+            PairingMessage::Request { attempt_id } => Ok(Self {
+                attempt_id,
+                deadline,
+                state: PairingResponseState::AwaitingDecision,
+            }),
+            PairingMessage::RequestAccepted { .. } | PairingMessage::RequestRejected { .. } => {
+                Err(PairingResponseError::NotARequest)
+            }
+        }
+    }
+
+    /// Returns the attempt correlation identifier echoed from the request.
+    #[must_use]
+    pub const fn attempt_id(&self) -> PairingAttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the caller-supplied deadline for this attempt.
+    #[must_use]
+    pub const fn deadline(&self) -> Duration {
+        self.deadline
+    }
+
+    /// Returns the current state.
+    #[must_use]
+    pub const fn state(&self) -> PairingResponseState {
+        self.state
+    }
+
+    /// Reports whether the attempt has reached a terminal state.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            PairingResponseState::ReadyForNextPairingStage
+                | PairingResponseState::Rejected(_)
+                | PairingResponseState::Cancelled
+                | PairingResponseState::TimedOut
+                | PairingResponseState::Failed
+        )
+    }
+
+    /// Reports whether the phase completed successfully.
+    ///
+    /// A `true` result means only that the caller reported the acceptance
+    /// reply's local transport send succeeded and this side may proceed to the
+    /// next, authenticated stage. It does not assert the initiator received the
+    /// reply, and it is not trust, authentication, verification, or transfer
+    /// authorization. If the initiator never receives the reply, later stages
+    /// fail or time out safely.
+    #[must_use]
+    pub const fn is_ready_for_next_pairing_stage(&self) -> bool {
+        matches!(self.state, PairingResponseState::ReadyForNextPairingStage)
+    }
+
+    /// Records an explicit local decision to accept the request.
+    ///
+    /// Valid only while awaiting the decision and within the deadline. It
+    /// produces the bounded `request-accepted` reply (returned in
+    /// [`PairingResponseEvent::Accepted`]) and moves to
+    /// [`PairingResponseState::AcceptedAwaitingSend`]; the caller sends the
+    /// reply through its transport and then, only if that local send succeeds,
+    /// calls [`mark_reply_sent`](Self::mark_reply_sent). Acceptance is local
+    /// willingness to continue: it creates no trust, persists nothing, and does
+    /// not by itself mean the reply left this device.
+    pub fn accept(&mut self, now: Duration) -> PairingResponseEvent {
+        if let Some(event) = self.short_circuit(now) {
+            return event;
+        }
+        match self.state {
+            PairingResponseState::AwaitingDecision => {
+                self.state = PairingResponseState::AcceptedAwaitingSend;
+                PairingResponseEvent::Accepted(PairingMessage::accepted(self.attempt_id).encode())
+            }
+            _ => PairingResponseEvent::Ignored(PairingResponseIgnored::DecisionAlreadyMade),
+        }
+    }
+
+    /// Records an explicit local decision to reject the request.
+    ///
+    /// Valid only while awaiting the decision and within the deadline. It
+    /// produces the bounded `request-rejected` reply (returned in
+    /// [`PairingResponseEvent::Rejected`]) with the given protocol reason and
+    /// moves to the absorbing [`PairingResponseState::Rejected`] state.
+    ///
+    /// The rejection is final on this side the moment it is recorded: this
+    /// responder will not proceed, the initiator stays untrusted, and no trust
+    /// or partial state results. Sending the reply is best effort — if it is
+    /// lost the initiator safely times out — so there is deliberately no
+    /// rejection-send state to mirror acceptance.
+    pub fn reject(
+        &mut self,
+        reason: PairingRejectionReason,
+        now: Duration,
+    ) -> PairingResponseEvent {
+        if let Some(event) = self.short_circuit(now) {
+            return event;
+        }
+        match self.state {
+            PairingResponseState::AwaitingDecision => {
+                self.state = PairingResponseState::Rejected(reason);
+                PairingResponseEvent::Rejected(
+                    PairingMessage::rejected(self.attempt_id, reason).encode(),
+                )
+            }
+            _ => PairingResponseEvent::Ignored(PairingResponseIgnored::DecisionAlreadyMade),
+        }
+    }
+
+    /// Records that the caller's local transport send of the acceptance reply
+    /// completed successfully, per that transport's own contract.
+    ///
+    /// This is a local send/handoff outcome only. It does **not** mean the
+    /// initiator received the reply, processed it, entered its next state, or
+    /// acknowledged it; this issue adds no acknowledgement or delivery receipt.
+    /// Valid only after [`accept`](Self::accept) and within the deadline; it
+    /// moves to the terminal [`PairingResponseState::ReadyForNextPairingStage`],
+    /// meaning this side has completed its local request-phase obligations.
+    pub fn mark_reply_sent(&mut self, now: Duration) -> PairingResponseEvent {
+        if let Some(event) = self.short_circuit(now) {
+            return event;
+        }
+        match self.state {
+            PairingResponseState::AcceptedAwaitingSend => {
+                self.state = PairingResponseState::ReadyForNextPairingStage;
+                PairingResponseEvent::ReadyForNextPairingStage
+            }
+            _ => PairingResponseEvent::Ignored(PairingResponseIgnored::NoAcceptedReply),
+        }
+    }
+
+    /// Cancels or records an interruption of the attempt on an explicit local
+    /// request.
+    ///
+    /// Cancellation and interruption are one outcome at this phase: both end the
+    /// attempt with no trust and require a fresh incoming request to retry. It
+    /// is immediate and not evaluated against the deadline.
+    pub fn cancel(&mut self) -> PairingResponseEvent {
+        if self.is_terminal() {
+            return PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved);
+        }
+        self.state = PairingResponseState::Cancelled;
+        PairingResponseEvent::Cancelled
+    }
+
+    /// Fails the attempt closed after the caller observes that the acceptance
+    /// reply could not be sent through its transport.
+    pub fn note_transport_failure(&mut self) -> PairingResponseEvent {
+        if self.is_terminal() {
+            return PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved);
+        }
+        self.state = PairingResponseState::Failed;
+        PairingResponseEvent::Failed
+    }
+
+    /// Evaluates the deadline against caller-supplied time without other input.
+    pub fn check_deadline(&mut self, now: Duration) -> PairingResponseEvent {
+        self.short_circuit(now)
+            .unwrap_or(PairingResponseEvent::Pending)
+    }
+
+    fn short_circuit(&mut self, now: Duration) -> Option<PairingResponseEvent> {
+        if self.is_terminal() {
+            return Some(PairingResponseEvent::Ignored(
+                PairingResponseIgnored::AlreadyResolved,
+            ));
+        }
+        if now >= self.deadline {
+            self.state = PairingResponseState::TimedOut;
+            return Some(PairingResponseEvent::TimedOut);
+        }
+        None
     }
 }
 
@@ -1210,5 +1533,448 @@ mod tests {
         assert!(failure.source().is_some());
         assert!(PairingRequestFailure::TransportFailure.source().is_none());
         assert!(!failure.to_string().is_empty());
+    }
+
+    // ----- responder side -----
+
+    fn request_bytes(attempt: u8) -> Vec<u8> {
+        PairingMessage::request(id(attempt)).encode()
+    }
+
+    fn presented() -> PairingResponse {
+        let responder = PairingResponse::from_request(&request_bytes(1), at(30)).unwrap();
+        assert_eq!(responder.state(), PairingResponseState::AwaitingDecision);
+        responder
+    }
+
+    fn decoded_reply(event: &PairingResponseEvent) -> PairingMessage {
+        let bytes = match event {
+            PairingResponseEvent::Accepted(bytes) | PairingResponseEvent::Rejected(bytes) => bytes,
+            other => panic!("expected a reply-bearing event, got {other:?}"),
+        };
+        assert!(bytes.len() <= MAX_PAIRING_MESSAGE_BYTES);
+        PairingMessage::decode(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_valid_request_creates_the_presentation_state_and_nothing_more() {
+        let responder = presented();
+
+        assert_eq!(responder.attempt_id(), id(1));
+        assert_eq!(responder.state(), PairingResponseState::AwaitingDecision);
+        assert!(!responder.is_terminal());
+        assert!(!responder.is_ready_for_next_pairing_stage());
+        // No automatic acceptance: presentation requires an explicit local
+        // decision, and there is no trusted/authenticated/verified accessor.
+    }
+
+    #[test]
+    fn the_responder_starts_only_from_a_request_message() {
+        // A reply message cannot begin responder state.
+        for reply in [
+            PairingMessage::accepted(id(1)).encode(),
+            PairingMessage::rejected(id(1), PairingRejectionReason::Busy).encode(),
+        ] {
+            assert_eq!(
+                PairingResponse::from_request(&reply, at(30)).unwrap_err(),
+                PairingResponseError::NotARequest
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_oversized_and_unsupported_request_bytes_cannot_create_state() {
+        // Out of length bounds.
+        for bytes in [
+            vec![],
+            vec![1_u8; 3],
+            vec![1_u8; MAX_PAIRING_MESSAGE_BYTES + 1],
+        ] {
+            assert!(matches!(
+                PairingResponse::from_request(&bytes, at(30)).unwrap_err(),
+                PairingResponseError::Protocol(_)
+            ));
+        }
+
+        // Unsupported version.
+        let mut wrong_version = request_bytes(1);
+        wrong_version[VERSION_OFFSET] = PAIRING_PROTOCOL_VERSION + 1;
+        assert_eq!(
+            PairingResponse::from_request(&wrong_version, at(30)).unwrap_err(),
+            PairingResponseError::Protocol(PairingMessageError::UnsupportedVersion {
+                version: PAIRING_PROTOCOL_VERSION + 1
+            })
+        );
+
+        // Unknown kind.
+        let mut wrong_kind = request_bytes(1);
+        wrong_kind[KIND_OFFSET] = 0;
+        assert_eq!(
+            PairingResponse::from_request(&wrong_kind, at(30)).unwrap_err(),
+            PairingResponseError::Protocol(PairingMessageError::UnknownMessageKind { kind: 0 })
+        );
+    }
+
+    #[test]
+    fn explicit_acceptance_reaches_readiness_only_after_a_successful_local_send() {
+        let mut responder = presented();
+
+        // Local accept alone is not readiness: it produces the reply and waits
+        // for a successful local transport send.
+        let event = responder.accept(at(5));
+        assert_eq!(
+            decoded_reply(&event),
+            PairingMessage::accepted(id(1)),
+            "the acceptance reply echoes the request attempt id"
+        );
+        assert_eq!(
+            responder.state(),
+            PairingResponseState::AcceptedAwaitingSend
+        );
+        assert!(!responder.is_terminal());
+        assert!(!responder.is_ready_for_next_pairing_stage());
+
+        // Readiness requires the explicit successful-local-send notification.
+        assert_eq!(
+            responder.mark_reply_sent(at(6)),
+            PairingResponseEvent::ReadyForNextPairingStage
+        );
+        assert_eq!(
+            responder.state(),
+            PairingResponseState::ReadyForNextPairingStage
+        );
+        assert!(responder.is_ready_for_next_pairing_stage());
+        assert!(responder.is_terminal());
+        // ReadyForNextPairingStage carries no payload: no trusted record, key,
+        // fingerprint, or remote-delivery acknowledgement. It is only permission
+        // for this side to proceed to the authenticated stage; the initiator may
+        // never have received the reply, in which case later stages fail or time
+        // out safely.
+    }
+
+    #[test]
+    fn explicit_rejection_produces_the_reply_and_is_immediately_terminal() {
+        for reason in [
+            PairingRejectionReason::Unspecified,
+            PairingRejectionReason::Busy,
+            PairingRejectionReason::Declined,
+        ] {
+            let mut responder = presented();
+
+            let event = responder.reject(reason, at(5));
+            assert_eq!(
+                decoded_reply(&event),
+                PairingMessage::rejected(id(1), reason),
+                "the rejection reply echoes the request attempt id and carries the typed reason"
+            );
+            assert_eq!(responder.state(), PairingResponseState::Rejected(reason));
+            assert!(responder.is_terminal());
+            assert!(!responder.is_ready_for_next_pairing_stage());
+        }
+    }
+
+    #[test]
+    fn there_is_no_automatic_acceptance_from_presentation_or_time() {
+        let mut responder = presented();
+
+        // Merely checking the deadline never accepts.
+        assert_eq!(
+            responder.check_deadline(at(1)),
+            PairingResponseEvent::Pending
+        );
+        assert_eq!(
+            responder.check_deadline(at(29)),
+            PairingResponseEvent::Pending
+        );
+        assert_eq!(responder.state(), PairingResponseState::AwaitingDecision);
+        assert!(!responder.is_ready_for_next_pairing_stage());
+    }
+
+    #[test]
+    fn the_responder_never_mints_a_replacement_attempt_id() {
+        let mut accepting = PairingResponse::from_request(&request_bytes(9), at(30)).unwrap();
+        let mut rejecting = PairingResponse::from_request(&request_bytes(9), at(30)).unwrap();
+
+        assert_eq!(accepting.attempt_id(), id(9));
+        assert_eq!(decoded_reply(&accepting.accept(at(1))).attempt_id(), id(9));
+        assert_eq!(
+            decoded_reply(&rejecting.reject(PairingRejectionReason::Declined, at(1))).attempt_id(),
+            id(9)
+        );
+    }
+
+    #[test]
+    fn the_responder_deadline_is_evaluated_only_against_caller_supplied_time() {
+        let mut responder = presented();
+
+        assert_eq!(
+            responder.check_deadline(at(29)),
+            PairingResponseEvent::Pending
+        );
+        assert_eq!(responder.state(), PairingResponseState::AwaitingDecision);
+
+        assert_eq!(
+            responder.check_deadline(at(30)),
+            PairingResponseEvent::TimedOut
+        );
+        assert_eq!(responder.state(), PairingResponseState::TimedOut);
+
+        for now in [at(31), at(1)] {
+            assert_eq!(
+                responder.check_deadline(now),
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_at_or_after_the_deadline_times_out_instead_of_accepting() {
+        let mut responder = presented();
+
+        assert_eq!(responder.accept(at(30)), PairingResponseEvent::TimedOut);
+        assert_eq!(responder.state(), PairingResponseState::TimedOut);
+        assert_eq!(
+            responder.accept(at(31)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+    }
+
+    #[test]
+    fn a_reply_cannot_be_marked_sent_once_the_deadline_has_passed() {
+        let mut responder = presented();
+        assert!(matches!(
+            responder.accept(at(5)),
+            PairingResponseEvent::Accepted(_)
+        ));
+
+        assert_eq!(
+            responder.mark_reply_sent(at(30)),
+            PairingResponseEvent::TimedOut
+        );
+        assert_eq!(responder.state(), PairingResponseState::TimedOut);
+    }
+
+    #[test]
+    fn rejection_after_the_deadline_times_out() {
+        let mut responder = presented();
+        assert_eq!(
+            responder.reject(PairingRejectionReason::Declined, at(30)),
+            PairingResponseEvent::TimedOut
+        );
+        assert_eq!(responder.state(), PairingResponseState::TimedOut);
+    }
+
+    #[test]
+    fn cancellation_ends_the_attempt_and_blocks_any_later_decision() {
+        // From the presentation state.
+        let mut from_presentation = presented();
+        assert_eq!(from_presentation.cancel(), PairingResponseEvent::Cancelled);
+        assert_eq!(from_presentation.state(), PairingResponseState::Cancelled);
+
+        // From after acceptance but before the reply's local send (an interruption).
+        let mut after_accept = presented();
+        let _ = after_accept.accept(at(1));
+        assert_eq!(after_accept.cancel(), PairingResponseEvent::Cancelled);
+        assert_eq!(after_accept.state(), PairingResponseState::Cancelled);
+
+        // No later decision can revive either.
+        for mut responder in [from_presentation, after_accept] {
+            assert_eq!(
+                responder.cancel(),
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+            assert_eq!(
+                responder.accept(at(2)),
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+            assert_eq!(
+                responder.reject(PairingRejectionReason::Busy, at(2)),
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+            assert_eq!(
+                responder.mark_reply_sent(at(2)),
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+        }
+    }
+
+    #[test]
+    fn a_transport_failure_fails_the_responder_attempt_closed() {
+        let mut responder = presented();
+        let _ = responder.accept(at(1));
+
+        assert_eq!(
+            responder.note_transport_failure(),
+            PairingResponseEvent::Failed
+        );
+        assert!(responder.is_terminal());
+        assert!(!responder.is_ready_for_next_pairing_stage());
+        assert_eq!(
+            responder.mark_reply_sent(at(2)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+    }
+
+    #[test]
+    fn duplicate_and_conflicting_local_decisions_are_deterministic_no_ops() {
+        // Accept twice: the second accept does not re-emit a reply.
+        let mut accept_twice = presented();
+        assert!(matches!(
+            accept_twice.accept(at(1)),
+            PairingResponseEvent::Accepted(_)
+        ));
+        assert_eq!(
+            accept_twice.accept(at(1)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::DecisionAlreadyMade)
+        );
+        assert_eq!(
+            accept_twice.state(),
+            PairingResponseState::AcceptedAwaitingSend
+        );
+
+        // Reject after accept: the acceptance stands.
+        assert_eq!(
+            accept_twice.reject(PairingRejectionReason::Declined, at(1)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::DecisionAlreadyMade)
+        );
+        assert_eq!(
+            accept_twice.state(),
+            PairingResponseState::AcceptedAwaitingSend
+        );
+
+        // Reject twice, then accept after reject.
+        let mut reject_twice = presented();
+        assert!(matches!(
+            reject_twice.reject(PairingRejectionReason::Busy, at(1)),
+            PairingResponseEvent::Rejected(_)
+        ));
+        assert_eq!(
+            reject_twice.reject(PairingRejectionReason::Busy, at(1)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+        assert_eq!(
+            reject_twice.accept(at(1)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+        assert_eq!(
+            reject_twice.state(),
+            PairingResponseState::Rejected(PairingRejectionReason::Busy)
+        );
+    }
+
+    #[test]
+    fn marking_a_reply_sent_before_acceptance_is_a_no_op() {
+        let mut responder = presented();
+        assert_eq!(
+            responder.mark_reply_sent(at(1)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::NoAcceptedReply)
+        );
+        assert_eq!(responder.state(), PairingResponseState::AwaitingDecision);
+    }
+
+    #[test]
+    fn readiness_is_absorbing_and_carries_no_trust_payload() {
+        let mut responder = presented();
+        let _ = responder.accept(at(1));
+        assert_eq!(
+            responder.mark_reply_sent(at(2)),
+            PairingResponseEvent::ReadyForNextPairingStage
+        );
+
+        // The success terminal is a unit variant. Every later input is a no-op.
+        for event in [
+            responder.accept(at(3)),
+            responder.reject(PairingRejectionReason::Declined, at(3)),
+            responder.mark_reply_sent(at(3)),
+            responder.cancel(),
+            responder.note_transport_failure(),
+            responder.check_deadline(at(3)),
+        ] {
+            assert_eq!(
+                event,
+                PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+            );
+        }
+        assert_eq!(
+            responder.state(),
+            PairingResponseState::ReadyForNextPairingStage
+        );
+    }
+
+    #[test]
+    fn a_responder_retry_requires_a_fresh_request_and_a_new_decision() {
+        let mut done = presented();
+        assert!(matches!(
+            done.reject(PairingRejectionReason::Declined, at(1)),
+            PairingResponseEvent::Rejected(_)
+        ));
+        assert!(done.is_terminal());
+
+        // A retry is a brand-new responder object built from a fresh incoming
+        // request. It shares no state and needs its own explicit decision.
+        let fresh = PairingResponse::from_request(&request_bytes(2), at(60)).unwrap();
+        assert_eq!(fresh.state(), PairingResponseState::AwaitingDecision);
+        assert!(!fresh.is_terminal());
+
+        // The old object stays terminal forever.
+        assert_eq!(
+            done.accept(at(2)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+        assert_eq!(
+            done.state(),
+            PairingResponseState::Rejected(PairingRejectionReason::Declined)
+        );
+        assert_eq!(fresh.state(), PairingResponseState::AwaitingDecision);
+    }
+
+    #[test]
+    fn receiving_a_request_and_accepting_it_are_both_distinct_from_trust() {
+        // Receiving: presentation state only, no trust signal.
+        let mut responder = presented();
+        assert!(!responder.is_ready_for_next_pairing_stage());
+
+        // Accepting: local willingness only. Still not ready, not terminal, and
+        // the reply has not been sent.
+        let _ = responder.accept(at(1));
+        assert!(!responder.is_ready_for_next_pairing_stage());
+        assert!(!responder.is_terminal());
+
+        // Success: only readiness for the authenticated stage. The strongest
+        // positive signal is a bool from a unit state; the type has no
+        // fingerprint, key, verified name, trusted-peer record, or remote-
+        // delivery acknowledgement, and no accessor that could expose one.
+        let _ = responder.mark_reply_sent(at(2));
+        assert!(responder.is_ready_for_next_pairing_stage());
+    }
+
+    #[test]
+    fn a_timeout_before_the_successful_send_notification_prevents_readiness() {
+        let mut responder = presented();
+        let _ = responder.accept(at(1));
+
+        // The deadline passes while the caller is still trying to send the reply.
+        assert_eq!(
+            responder.check_deadline(at(30)),
+            PairingResponseEvent::TimedOut
+        );
+        assert_eq!(responder.state(), PairingResponseState::TimedOut);
+        assert!(!responder.is_ready_for_next_pairing_stage());
+
+        // A later successful-send notification cannot revive it.
+        assert_eq!(
+            responder.mark_reply_sent(at(31)),
+            PairingResponseEvent::Ignored(PairingResponseIgnored::AlreadyResolved)
+        );
+        assert!(!responder.is_ready_for_next_pairing_stage());
+    }
+
+    #[test]
+    fn responder_error_categories_expose_their_typed_source() {
+        let protocol =
+            PairingResponseError::Protocol(PairingMessageError::InvalidLength { len: 0 });
+        assert!(protocol.source().is_some());
+        assert!(!protocol.to_string().is_empty());
+        assert!(PairingResponseError::NotARequest.source().is_none());
     }
 }

@@ -48,17 +48,28 @@ Portable core discovery state consumes these validated browser events with calle
 
 Repeated pairing requests must be bounded, and a retry starts a fresh untrusted attempt that inherits no state from a failed one. The core state machine for the pairing attempt, trusted-peer records, identity-change detection and recovery, and local reset versus revocation is specified in [trust.md](trust.md). Key rotation semantics still need to be resolved before the pairing protocol is finalized.
 
-### Initiator request phase
+### Pairing request phase
 
-The first phase of a pairing attempt is the initiator asking a currently untrusted device to begin pairing. `local-transfer-core` implements the initiator side (`pairing::PairingRequest`) as a deterministic state machine that reads no clock and performs no cryptography.
+The first phase of a pairing attempt is one currently untrusted device asking another to begin pairing, and the other device's explicit local accept or reject. `local-transfer-core` implements both sides — `pairing::PairingRequest` (initiator) and `pairing::PairingResponse` (responder) — as deterministic state machines over one small bounded wire message family. Neither reads a clock or performs cryptography.
 
-- The initiator creates the attempt only from an explicit local action, which supplies just a deadline. The initiator core mints a fresh transient 16-byte correlation token for each new attempt; the caller neither chooses nor reuses it, so every retry is a new, independent attempt. The token correlates the phase's messages and is never a peer identity, a credential, or trust. No discovered-peer, address, hostname, or discovery-key value is part of the attempt state; addressing the target is the caller's responsibility.
-- Three bounded messages are defined, each carrying an explicit one-byte protocol version and the attempt identifier: a pairing request, a request acceptance, and a request rejection with a small closed reason (`unspecified`, `busy`, or `declined`). Messages are validated for length, version, kind, per-kind length, and reason before they reach the state machine. Malformed, oversized, truncated, unsupported, or role-inappropriate input fails the attempt closed.
+Three bounded messages are defined, each carrying an explicit one-byte protocol version and the 16-byte attempt identifier: a pairing request, a request acceptance, and a request rejection with a small closed reason (`unspecified`, `busy`, or `declined`). Bytes are validated for length, version, kind, per-kind length, and reason before they can affect any state machine; input never exceeds the fixed maximum message size. The framing is intentionally minimal and provisional, not the project's final wire format.
+
+**Initiator.**
+
+- The initiator creates the attempt only from an explicit local action, which supplies just a deadline. The core mints a fresh transient correlation token for each new attempt; the caller neither chooses nor reuses it, so every retry is a new, independent attempt. The token correlates the phase's messages and is never a peer identity, a credential, or trust. No discovered-peer, address, hostname, or discovery-key value is part of the attempt state; addressing the target is the caller's responsibility.
 - A response referencing a different attempt identifier is ignored without disturbing the attempt. Duplicate, reordered, or late messages never revive a terminal attempt. The deadline is evaluated only against caller-supplied monotonic time, so a response at or after the deadline times the attempt out instead of resolving it.
-- Timeout, cancellation, remote rejection, and protocol failure are terminal and leave nothing behind. A retry is a brand-new attempt with its own identifier and deadline; no state carries over, and nothing shortcuts later user initiation, authentication, or verification.
-- The successful terminal state means only that the attempt may proceed to the next, authenticated pairing stage. It is not trust, authentication, verification, or transfer authorization. An active attacker able to answer the request still cannot pass the later authenticated, user-verified stage, and this phase creates and persists nothing.
+- Timeout, cancellation, remote rejection, malformed input, and protocol failure are terminal and leave nothing behind.
 
-The authenticated key agreement, the short-authentication-string comparison, the responder-side state, and trusted-peer persistence remain separate issues. The message framing above is intentionally minimal and provisional, not the project's final wire format.
+**Responder.**
+
+- The responder begins only from a validated incoming request message — never from a discovery observation, and never from an accept or reject message. The attempt's correlation token is taken from that request and echoed, unchanged, into the reply; the responder never mints a replacement.
+- A valid request enters an explicit presentation state that waits for a local decision. That state exposes only the correlation token; discovery hints (display name, hostname, address, endpoint, discovery key) stay outside core as the adapter's routing/presentation metadata and never become identity.
+- Acceptance and rejection are explicit local operations. Acceptance produces the bounded acceptance reply and means only that the user is willing to continue to the next authenticated stage; it creates no trust. Because local willingness is not the same as protocol progression, the responder reaches its successful terminal state only after the caller reports that its own transport send of the acceptance reply succeeded — a send failure before then fails the attempt closed. That terminal state does not assert the initiator received the reply; if it did not, later stages fail or time out safely. Rejection produces the bounded rejection reply and is final on the responder the moment it is recorded; sending it is best effort, and a lost rejection is covered by the initiator's own deadline, so there is no rejection-send state.
+- Cancellation and interruption are one outcome. Timeout, cancellation, and transport failure are terminal, leave no trust, and require a fresh incoming request to retry.
+
+**Both sides.** Terminal states are absorbing: later network input or local actions never revive an attempt or return it to a waiting state. The successful terminal state means only that the attempt may proceed to the next, authenticated pairing stage — not trust, authentication, verification, persistent pairing, or transfer authorization. An active attacker able to answer a request, or to send one, still cannot pass the later authenticated, user-verified stage, and this phase creates and persists nothing.
+
+The authenticated key agreement, the short-authentication-string comparison, and trusted-peer persistence remain separate issues. There is no cryptographic-identity or user-verification mismatch outcome at this phase because no such material exists yet; that outcome is deferred to the authentication and verification issues.
 
 ## Connection lifecycle
 

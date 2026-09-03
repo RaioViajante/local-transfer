@@ -189,13 +189,21 @@ No attempt state except a successful `Committing` may create persistent trust.
 Every terminal failure state leaves **no** trusted-peer record and no partial
 trust.
 
-The initiator side of the request phase — the move from `Started` toward
-`AwaitingAuthentication` — is implemented in `pairing::PairingRequest`
-(see [protocol.md](protocol.md)). Its concrete states and message validation
-live in code; it establishes no trust, runs no cryptography, and persists
-nothing, so it does not change the contract above. Completing that phase
-corresponds only to "the attempt may proceed to the next authenticated stage",
-never to any state at or beyond `AwaitingUserVerification`.
+The request phase — the move from `Started` toward `AwaitingAuthentication` — is
+implemented for both sides in code: `pairing::PairingRequest` (initiator) and
+`pairing::PairingResponse` (responder), see [protocol.md](protocol.md). Their
+concrete states and message validation live there; neither establishes trust,
+runs cryptography, or persists anything, so they do not change the contract
+above. The responder presents an incoming request for an explicit local
+decision: rejecting is terminal with no trust, and accepting means only local
+willingness to continue — the responder reaches "may proceed to the next
+authenticated stage" only once the caller reports its own transport send of the
+acceptance reply succeeded, and even then makes no claim that the initiator
+received it. Completing the phase on either side corresponds only to that
+readiness, never to any state at or beyond `AwaitingUserVerification`. The `AwaitingUserVerification`
+mismatch outcome and any cryptographic-identity mismatch stay deferred to the
+authentication and verification issues, since no such material exists in this
+phase.
 
 ### 4. User-verifiable step
 
