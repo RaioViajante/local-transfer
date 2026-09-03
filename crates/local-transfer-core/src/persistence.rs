@@ -141,6 +141,38 @@ fn prepare_parent(
     Ok(parent.to_path_buf())
 }
 
+/// Ensures the parent directory of `destination` exists with restrictive
+/// permissions, without creating `destination` itself.
+///
+/// Newly created directories are hardened; an already-existing parent is
+/// hardened only when `harden_existing` is set, matching
+/// [`create_synced_temporary`].
+pub(crate) fn ensure_hardened_parent(
+    destination: &Path,
+    harden_existing: bool,
+) -> Result<(), PersistenceError> {
+    prepare_parent(destination, harden_existing).map(|_| ())
+}
+
+/// Best-effort flush of the directory entry after an atomic rename.
+///
+/// On Unix, an `fsync` of the containing directory makes a completed
+/// [`NamedTempFile::persist`] rename durable across a crash. On other platforms
+/// this is a no-op: the guarantee is then limited to flushed file contents plus
+/// the atomic rename itself.
+#[cfg(unix)]
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_directory_permissions(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

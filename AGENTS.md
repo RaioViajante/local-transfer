@@ -15,9 +15,9 @@ The threat model and unresolved design decisions in [README.md](README.md), [doc
 
 ## Repository architecture
 
-This is a Rust 2024 workspace with Rust 1.85 as its minimum supported version.
+This is a Rust 2024 workspace with Rust 1.89 as its minimum supported version. The 1.89 floor enables the standard-library file-locking API used by security-sensitive persistence.
 
-- `crates/local-transfer-core`: shared domain library. It owns local device identity, display-name and platform models, private filesystem persistence, bounded discovery metadata, DNS-SD advertisement, and DNS-SD browsing. Public modules expose small typed APIs; infrastructure adapters and persistence details remain private.
+- `crates/local-transfer-core`: shared domain library. It owns local device identity, display-name and platform models, private filesystem persistence, bounded discovery metadata, DNS-SD advertisement, DNS-SD browsing, the initiator and responder pairing-request state machines, and the durable trusted-peer store. Public modules expose small typed APIs; infrastructure adapters and persistence details remain private.
 - `apps/cli`: Clap-based `local-transfer` binary and terminal adapter. It currently exposes the `device` command and translates core results into stdout, stderr, and exit codes. Domain behavior belongs in the core rather than the CLI.
 - `apps/desktop`: reserved for the future Tauri/React application; it is not currently a workspace member or an initialized application. Follow its README and `docs/desktop.md` without creating planned components unless the task requires them.
 - `docs`: architecture, security, trust and pairing, protocol, CLI, desktop, and roadmap decisions. Cross-reference these documents instead of duplicating them.

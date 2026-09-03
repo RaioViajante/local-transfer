@@ -9,6 +9,7 @@ pub mod identity;
 mod local_device;
 pub mod pairing;
 pub mod platform;
+pub mod trusted_peers;
 
 mod persistence;
 

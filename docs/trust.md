@@ -247,8 +247,59 @@ justification in the implementing issue.
 Trusted cryptographic identity and presentation metadata are separate: the
 fingerprint authenticates; the label only helps a human read the list.
 
-Persisting trusted-peer records is a later issue (#20). This document defines
-the shape; it does not add storage.
+#### Implemented durable record (issue #20)
+
+`crates/local-transfer-core/src/trusted_peers.rs` implements the durable side.
+The persisted record is deliberately smaller than the conceptual table above:
+
+- **Authenticated key identity** (`PeerKeyIdentity`): a `u16` scheme
+  discriminator (a namespace for the future authenticated-identity
+  representation — this issue assigns no values and treats every value as
+  structurally valid) plus 1–64 bytes of opaque key material. It is a *persisted
+  recognition token*, not a usable authenticated identity: decoding it proves
+  nothing cryptographically, a scheme the running build does not recognise still
+  loads, and whether a stored token still matches a peer is decided only by the
+  future authenticated-pairing layer re-establishing authentication and
+  comparing. It is nonetheless the single security-relevant field and the
+  store's only lookup, deduplication, and removal key.
+- **Presentation label** (optional): a validated 1–64-character UTF-8 string,
+  marked presentation-only, never a lookup key or trust input. It may be edited
+  later; editing it never rebinds the identity. It is stored hex-encoded for
+  deterministic parsing — a reversible encoding, not encryption.
+
+Fields intentionally **not** persisted, because no concrete durable purpose
+exists yet: a separate local record identifier (the key identity is already a
+stable, unambiguous handle), a trust-establishment timestamp, and a local
+trust-status / identity-changed marker. The identity-changed (suspect) condition
+is therefore **recomputed on next authenticated contact** — comparing the
+presented key identity to the stored one — not stored. The format is versioned,
+so a later issue can add a field with a version bump.
+
+Storage: one versioned, size-bounded file (`trusted-peers`, up to 64 KiB, up to
+128 records) plus a persistent sibling `trusted-peers.lock` file, both in the
+application configuration directory. On Unix both are `0600` in a `0700`
+directory; on other platforms they inherit the location's protection and no
+stronger guarantee is claimed. Every change is one **exclusively locked
+transaction** — acquire an OS advisory lock on `trusted-peers.lock`
+(non-blocking; a lock held by another process is a typed "busy" error), then
+load, modify, encode, write to a synced temporary file, rename atomically over
+the store, sync the file, and on Unix fsync the directory entry — so two
+concurrent writers cannot lose an update and a removed record cannot be
+resurrected by a stale writer. Reads are lock-free (atomic replacement plus
+reading through a pinned descriptor gives a whole-old-or-whole-new snapshot) and
+have a hard allocation ceiling before any bytes are read. A loaded file is
+untrusted local input: any malformed, truncated, oversized, unsupported-version,
+duplicate-identity, or conflicting content fails the **whole** load closed —
+corruption never silently drops a record or falls back to a discovery hint. A
+symbolic link at either path is refused and its target is never read, written,
+or `chmod`ed. Durable write and removal report typed success or failure and
+never claim success without the operation completing; a failed durable removal
+is reported as a failure. Guarantee: flushed contents plus atomic rename — not
+power-loss or transactional-filesystem consistency, and not resistance to a
+same-user process racing every filesystem operation. Disabling **effective
+runtime trust** on reset or revocation (section 7) happens above this boundary
+and independently of it; persistence only reports the durable outcome
+truthfully.
 
 ### 6. Identity change
 
@@ -516,13 +567,21 @@ Trusted is to drive a core pairing attempt that reaches a valid commit.
 
 ### Persistence adapter
 
-Eventually owns durable-storage mechanics only:
+Owns durable-storage mechanics only. Implemented for trusted peers by
+`trusted_peers::TrustedPeerStore` (issue #20):
 
-- atomic writes and no-clobber / replace semantics consistent with the existing
-  identity stores;
-- restrictive permissions where the platform supports them;
-- reporting durable success, or an explicit durability failure, for a trust
-  commit or a trust removal.
+- atomic whole-file replacement consistent with the existing identity stores,
+  plus a directory fsync on Unix;
+- an exclusive OS advisory lock (persistent sibling `.lock` file) serialising
+  every read-modify-write mutation across processes, non-blocking with a typed
+  "busy" outcome; lock-free reads;
+- restrictive permissions where the platform supports them (`0600` file and
+  lock / `0700` directory on Unix);
+- a versioned, bounded on-disk format read under a hard allocation ceiling and
+  fully validated before any record is returned, with whole-store fail-closed on
+  corruption and refusal of a symlinked store/lock path;
+- reporting durable success, or an explicit typed durability failure, for a
+  trust commit or a trust removal.
 
 It does not define trust semantics, validity, or transitions, and it never
 reinterprets what effective trust means; a durability failure it reports leaves
@@ -596,17 +655,23 @@ removal always disables effective trust even when its durable write fails.
   confirmation).
 - Whether revocation keeps a durable local marker that blocks silent re-trust of
   the same fingerprint, or whether reset and revocation are operationally
-  identical.
-- The atomic durable representation of trust removal / revocation that lets the
-  system claim durable success — deferred to the trusted-peer storage issue
-  (#20).
+  identical. (No marker is stored today; a version bump can add one.)
 - Pairing attempt timeout duration and the retry rate/count bounds.
-- The trusted-peer storage format and location (issue #20), including whether
-  the identity-changed state is persisted or recomputed on next contact.
-- Whether the trusted-peer label may be edited after creation and how it is
-  seeded.
 - How a local device cryptographic identity reset is communicated to peers that
   still trust the previous identity (roadmap Phase 1 / Phase 3 boundary).
+
+Resolved by issue #20 (see [Implemented durable record](#implemented-durable-record-issue-20)):
+
+- The trusted-peer storage format and location — a versioned, bounded
+  `trusted-peers` file in the configuration directory, replaced atomically.
+- Whether the identity-changed state is persisted or recomputed — recomputed on
+  next authenticated contact; not stored.
+- The atomic durable representation of trust removal / revocation — atomic
+  whole-file replacement; `remove` reports typed success/failure and never
+  reports a failed durable removal as success.
+- Whether the label may be edited and how it is seeded — it may be re-stored for
+  the same key identity (label only; the identity binding is immutable), and the
+  caller seeds it, optionally from a discovery hint at pairing time.
 
 ## Future issues that should follow this specification
 
